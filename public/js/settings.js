@@ -1,6 +1,6 @@
 class SettingsManager {
   constructor() {
-    this.providers = ['gemini', 'groq', 'openai', 'claude', 'openrouter', 'mistral', 'cerebras', 'cohere'];
+    this.providers = ['gemini', 'groq', 'openai', 'claude', 'openrouter', 'mistral', 'cerebras', 'cohere', 'deepseek', 'together'];
     this.providerLabels = {
       gemini: 'Google Gemini',
       groq: 'Groq',
@@ -9,7 +9,9 @@ class SettingsManager {
       openrouter: 'OpenRouter',
       mistral: 'Mistral AI',
       cerebras: 'Cerebras',
-      cohere: 'Cohere'
+      cohere: 'Cohere',
+      deepseek: 'DeepSeek',
+      together: 'Together AI'
     };
     this.providerLinks = {
       gemini: 'https://aistudio.google.com/apikey',
@@ -19,7 +21,9 @@ class SettingsManager {
       openrouter: 'https://openrouter.ai/keys',
       mistral: 'https://console.mistral.ai/api-keys',
       cerebras: 'https://cloud.cerebras.ai/platform',
-      cohere: 'https://dashboard.cohere.com/api-keys'
+      cohere: 'https://dashboard.cohere.com/api-keys',
+      deepseek: 'https://platform.deepseek.com/api_keys',
+      together: 'https://api.together.ai/settings/api-keys'
     };
     
     this.modal = document.getElementById('settings-modal');

@@ -11,6 +11,8 @@ const OpenRouterProvider = require('./providers/openrouter');
 const MistralProvider = require('./providers/mistral');
 const CerebrasProvider = require('./providers/cerebras');
 const CohereProvider = require('./providers/cohere');
+const DeepSeekProvider = require('./providers/deepseek');
+const TogetherProvider = require('./providers/together');
 
 class SmartRouter {
   constructor() {
@@ -22,7 +24,9 @@ class SmartRouter {
       openrouter: new OpenRouterProvider(),
       mistral: new MistralProvider(),
       cerebras: new CerebrasProvider(),
-      cohere: new CohereProvider()
+      cohere: new CohereProvider(),
+      deepseek: new DeepSeekProvider(),
+      together: new TogetherProvider()
     };
     this.providerKeys = Object.keys(this.providers);
     this.roundRobinIndex = 0;
