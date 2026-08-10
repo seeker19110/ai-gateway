@@ -7,6 +7,10 @@ const GeminiProvider = require('./providers/gemini');
 const GroqProvider = require('./providers/groq');
 const OpenAIProvider = require('./providers/openai');
 const ClaudeProvider = require('./providers/claude');
+const OpenRouterProvider = require('./providers/openrouter');
+const MistralProvider = require('./providers/mistral');
+const CerebrasProvider = require('./providers/cerebras');
+const CohereProvider = require('./providers/cohere');
 
 class SmartRouter {
   constructor() {
@@ -14,7 +18,11 @@ class SmartRouter {
       gemini: new GeminiProvider(),
       groq: new GroqProvider(),
       openai: new OpenAIProvider(),
-      claude: new ClaudeProvider()
+      claude: new ClaudeProvider(),
+      openrouter: new OpenRouterProvider(),
+      mistral: new MistralProvider(),
+      cerebras: new CerebrasProvider(),
+      cohere: new CohereProvider()
     };
     this.providerKeys = Object.keys(this.providers);
     this.roundRobinIndex = 0;

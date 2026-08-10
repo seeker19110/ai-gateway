@@ -10,7 +10,11 @@ class ProviderRouter {
       { id: 'gemini', name: 'Google Gemini', model: 'gemini-2.0-flash', status: 'inactive', count: 0 },
       { id: 'groq', name: 'Groq', model: 'llama-3.3-70b', status: 'inactive', count: 0 },
       { id: 'openai', name: 'OpenAI', model: 'gpt-4o-mini', status: 'inactive', count: 0 },
-      { id: 'claude', name: 'Claude', model: 'claude-3-haiku', status: 'inactive', count: 0 }
+      { id: 'claude', name: 'Claude', model: 'claude-3-haiku', status: 'inactive', count: 0 },
+      { id: 'openrouter', name: 'OpenRouter', model: 'llama-3.3-70b:free', status: 'inactive', count: 0 },
+      { id: 'mistral', name: 'Mistral AI', model: 'mistral-small-latest', status: 'inactive', count: 0 },
+      { id: 'cerebras', name: 'Cerebras', model: 'llama-3.3-70b', status: 'inactive', count: 0 },
+      { id: 'cohere', name: 'Cohere', model: 'command-r7b', status: 'inactive', count: 0 }
     ];
   }
   
