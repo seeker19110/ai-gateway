@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "AI API Gateway - xoay vòng 10 nhà cung cấp AI với failover phân loại theo mã lỗi; nói chuẩn OpenAI Chat Completions (có stream)",
   "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
