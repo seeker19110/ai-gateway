@@ -101,8 +101,13 @@ class App {
         return;
       }
       
-      // Hiển thị phản hồi từ AI với badge provider
-      this.chat.addMessage('ai', data.response, data.provider);
+      // Badge nói rõ cả TÀI KHOẢN nào đã phục vụ khi nhà đó có nhiều key: biết "gemini"
+      // trả lời là chưa đủ để lần ra key nào đang gánh và key nào đang nghỉ.
+      const accounts = this.router.providers.find(p => p.id === data.provider)?.accounts || [];
+      const badge = accounts.length > 1 && data.account
+        ? `${data.provider} · ${data.account}`
+        : data.provider;
+      this.chat.addMessage('ai', data.response, badge);
       
       // Cập nhật trạng thái tất cả providers
       if (data.status) {
