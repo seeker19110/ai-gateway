@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Đẩy commit mới lên một PR thì hủy lượt chạy cũ của chính PR đó: kết quả của commit
+# đã bị thay thế không nói lên điều gì, mà vẫn chiếm runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Một phiên bản Node đỏ không được che kết quả của phiên bản kia — cần biết lỗi
+      # nằm ở code hay chỉ ở một phiên bản.
+      fail-fast: false
+      matrix:
+        # Gateway cần `fetch` và `node:test`, nên tối thiểu là Node 18; 18 đã hết hạn
+        # hỗ trợ nên chỉ chạy hai bản còn được bảo trì.
+        node-version: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # `npm ci` chứ không phải `npm install`: cài đúng theo package-lock.json và fail
+      # nếu lockfile lệch với package.json, thay vì âm thầm sửa lockfile trên CI.
+      - run: npm ci
+
+      - run: npm test
