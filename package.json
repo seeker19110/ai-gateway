@@ -1,11 +1,12 @@
 {
   "name": "ai-gateway",
   "version": "1.0.0",
-  "description": "AI API Gateway - Xoay vòng nhiều nhà cung cấp AI miễn phí",
+  "description": "AI API Gateway - xoay vòng 10 nhà cung cấp AI với failover phân loại theo mã lỗi; nói chuẩn OpenAI Chat Completions (có stream)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "express": "^4.21.0",

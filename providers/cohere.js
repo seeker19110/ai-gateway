@@ -1,4 +1,6 @@
 const BaseProvider = require('./base');
+const { UpstreamError } = require('../lib/errors');
+const { parseSSEJson } = require('../lib/sse');
 
 class CohereProvider extends BaseProvider {
   constructor() {
@@ -9,52 +11,66 @@ class CohereProvider extends BaseProvider {
   }
 
   async chat(messages, apiKey) {
-    if (!apiKey) throw new Error('Cần có API key');
+    if (!apiKey) throw new UpstreamError('Cần có API key cho Cohere', 401);
 
-    const url = 'https://api.cohere.com/v2/chat';
+    const data = await this.request('https://api.cohere.com/v2/chat', {
+      method: 'POST',
+      headers: cohereHeaders(apiKey),
+      body: JSON.stringify({ model: this.model, messages: normalizeCohereMessages(messages) })
+    });
 
-    const systemMessages = messages
-      .filter(m => m.role === 'system')
-      .map(m => ({ role: 'system', content: m.content }));
-    const chatMessages = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+    const text = (data?.message?.content || [])
+      .map((c) => c.text)
+      .filter(Boolean)
+      .join('');
 
-    try {
-      this.trackRequest();
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: this.model,
-          messages: [...systemMessages, ...chatMessages]
-        })
-      });
+    if (!text) {
+      throw new UpstreamError('Cohere trả về phản hồi rỗng hoặc sai định dạng', 502);
+    }
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        if (response.status === 429) {
-          this.setCooldown(60);
-          throw new Error('Đã vượt quá giới hạn request (Rate limited)');
-        }
-        throw new Error(errorData.message || `Lỗi HTTP: ${response.status}`);
+    return { text, usage: cohereUsage(data.usage) };
+  }
+
+  async *stream(messages, apiKey) {
+    if (!apiKey) throw new UpstreamError('Cần có API key cho Cohere', 401);
+
+    const response = await this.requestRaw('https://api.cohere.com/v2/chat', {
+      method: 'POST',
+      headers: { ...cohereHeaders(apiKey), Accept: 'text/event-stream' },
+      body: JSON.stringify({
+        model: this.model,
+        messages: normalizeCohereMessages(messages),
+        stream: true
+      })
+    });
+
+    for await (const { payload } of parseSSEJson(response)) {
+      if (payload?.type === 'content-delta') {
+        const text = payload.delta?.message?.content?.text;
+        if (text) yield { text };
+      } else if (payload?.type === 'message-end') {
+        yield { usage: cohereUsage(payload.delta?.usage) };
       }
-
-      const data = await response.json();
-      const text = data.message?.content?.map(c => c.text).join('') || '';
-      if (!text) {
-        throw new Error('Định dạng phản hồi không hợp lệ');
-      }
-
-      return text;
-    } catch (error) {
-      this.lastError = error.message;
-      throw error;
     }
   }
+}
+
+function cohereHeaders(apiKey) {
+  return { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
+}
+
+function normalizeCohereMessages(messages) {
+  return messages.map((m) => ({
+    role: m.role === 'system' ? 'system' : m.role === 'assistant' ? 'assistant' : 'user',
+    content: m.content
+  }));
+}
+
+function cohereUsage(usage = {}) {
+  const billed = usage?.billed_units || usage?.tokens || {};
+  const prompt = Number(billed.input_tokens) || 0;
+  const completion = Number(billed.output_tokens) || 0;
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion };
 }
 
 module.exports = CohereProvider;
