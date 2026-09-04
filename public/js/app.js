@@ -92,7 +92,9 @@ class App {
       this.btnSend.disabled = false;
       
       if (!response.ok) {
-        this.chat.addMessage('ai', `❌ **Lỗi:** ${data.error || 'Không thể kết nối đến máy chủ'}`);
+        // Lỗi từ server có dạng { error: { message, status } }.
+        const message = data.error?.message || data.error || 'Không thể kết nối đến máy chủ';
+        this.chat.addMessage('ai', `❌ **Lỗi:** ${message}`);
         if (data.statuses) {
           this.router.updateStatuses(data.statuses);
         }
