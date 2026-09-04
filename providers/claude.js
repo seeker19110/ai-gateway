@@ -1,22 +1,44 @@
 const BaseProvider = require('./base');
 const { UpstreamError } = require('../lib/errors');
 const { parseSSEJson } = require('../lib/sse');
+const { readRateLimit } = require('../lib/ratelimit');
+const { toAnthropic } = require('../lib/params');
+const { toAlternating } = require('../lib/messages');
+
+const URL = 'https://api.anthropic.com/v1/messages';
+const DEFAULT_MAX_TOKENS = 4096;
 
 class ClaudeProvider extends BaseProvider {
-  constructor() {
+  constructor(options = {}) {
     super('claude', 'Anthropic Claude', {
       model: 'claude-3-haiku-20240307',
-      maxRPM: 5
+      maxRPM: 5,
+      dialect: 'anthropic',
+      // Anthropic không có `seed`, `presence_penalty`, `frequency_penalty` hay `user` —
+      // và trả 400 cho trường lạ, nên gửi kèm là làm hỏng cả request.
+      paramSupport: ['temperature', 'top_p', 'top_k', 'max_tokens', 'stop'],
+      // `temperature` của Anthropic chỉ tới 1, trong khi chuẩn OpenAI cho tới 2.
+      paramRanges: { temperature: [0, 1], top_p: [0, 1], top_k: [1, 500] },
+      ...options
+    });
+    this.defaultMaxTokens = options.defaultMaxTokens || DEFAULT_MAX_TOKENS;
+  }
+
+  translateParams(params = {}) {
+    return toAnthropic(params, {
+      allow: this.paramSupport,
+      ranges: this.paramRanges,
+      defaultMaxTokens: this.defaultMaxTokens
     });
   }
 
-  async chat(messages, apiKey) {
+  async chat(messages, apiKey, { model, params = {} } = {}) {
     if (!apiKey) throw new UpstreamError('Cần có API key cho Anthropic Claude', 401);
 
-    const data = await this.request('https://api.anthropic.com/v1/messages', {
+    const { data, rateLimit } = await this.request(URL, {
       method: 'POST',
       headers: anthropicHeaders(apiKey),
-      body: JSON.stringify(buildAnthropicBody(messages, this.model))
+      body: JSON.stringify(this.buildBody(messages, params, model))
     });
 
     const text = (data?.content || [])
@@ -28,17 +50,19 @@ class ClaudeProvider extends BaseProvider {
       throw new UpstreamError('Claude trả về phản hồi rỗng hoặc sai định dạng', 502);
     }
 
-    return { text, usage: anthropicUsage(data.usage) };
+    return { text, usage: anthropicUsage(data.usage), rateLimit };
   }
 
-  async *stream(messages, apiKey) {
+  async *stream(messages, apiKey, { model, params = {} } = {}) {
     if (!apiKey) throw new UpstreamError('Cần có API key cho Anthropic Claude', 401);
 
-    const response = await this.requestRaw('https://api.anthropic.com/v1/messages', {
+    const response = await this.requestRaw(URL, {
       method: 'POST',
       headers: { ...anthropicHeaders(apiKey), Accept: 'text/event-stream' },
-      body: JSON.stringify({ ...buildAnthropicBody(messages, this.model), stream: true })
+      body: JSON.stringify({ ...this.buildBody(messages, params, model), stream: true })
     });
+
+    yield { rateLimit: readRateLimit(response.headers) };
 
     // Anthropic đếm token đầu vào ở `message_start` và token đầu ra ở `message_delta`;
     // gộp lại mới ra usage đầy đủ.
@@ -66,13 +90,28 @@ class ClaudeProvider extends BaseProvider {
           break;
         }
         case 'error':
-          // Anthropic báo lỗi giữa stream bằng một sự kiện, HTTP vẫn là 200.
+          // Anthropic báo lỗi giữa stream bằng một sự kiện, HTTP vẫn là 200. `overloaded_error`
+          // là ca thường gặp nhất và nó đáng được xoay vòng như một 529, nên phải mang đúng
+          // mã đó ra ngoài chứ không gộp hết vào 502.
           throw new UpstreamError(
             `Claude lỗi giữa stream: ${payload.error?.message || 'không rõ'}`,
-            502
+            payload.error?.type === 'overloaded_error' ? 529 : 502
           );
       }
     }
+  }
+
+  buildBody(messages, params, model) {
+    const { system, turns } = toAlternating(messages);
+    const body = {
+      model: model || this.model,
+      // `max_tokens` là trường BẮT BUỘC của API này — thiếu nó là 400 chứ không phải một
+      // giá trị mặc định nào đó của họ.
+      ...this.translateParams(params),
+      messages: turns
+    };
+    if (system) body.system = system;
+    return body;
   }
 }
 
@@ -82,21 +121,6 @@ function anthropicHeaders(apiKey) {
     'x-api-key': apiKey,
     'anthropic-version': '2023-06-01'
   };
-}
-
-function buildAnthropicBody(messages, model) {
-  const system = messages
-    .filter((m) => m.role === 'system')
-    .map((m) => m.content)
-    .join('\n');
-
-  const body = {
-    model,
-    max_tokens: 4096,
-    messages: messages.filter((m) => m.role !== 'system')
-  };
-  if (system) body.system = system;
-  return body;
 }
 
 function anthropicUsage(usage = {}) {

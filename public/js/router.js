@@ -7,16 +7,16 @@ class ProviderRouter {
     this.selectedProvider = null;
     
     this.providers = [
-      { id: 'gemini', name: 'Google Gemini', model: 'gemini-2.0-flash', status: 'inactive', count: 0 },
-      { id: 'groq', name: 'Groq', model: 'llama-3.3-70b', status: 'inactive', count: 0 },
-      { id: 'openai', name: 'OpenAI', model: 'gpt-4o-mini', status: 'inactive', count: 0 },
-      { id: 'claude', name: 'Claude', model: 'claude-3-haiku', status: 'inactive', count: 0 },
-      { id: 'openrouter', name: 'OpenRouter', model: 'llama-3.3-70b:free', status: 'inactive', count: 0 },
-      { id: 'mistral', name: 'Mistral AI', model: 'mistral-small-latest', status: 'inactive', count: 0 },
-      { id: 'cerebras', name: 'Cerebras', model: 'llama-3.3-70b', status: 'inactive', count: 0 },
-      { id: 'cohere', name: 'Cohere', model: 'command-r7b', status: 'inactive', count: 0 },
-      { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', status: 'inactive', count: 0 },
-      { id: 'together', name: 'Together AI', model: 'llama-3.3-70b-turbo-free', status: 'inactive', count: 0 }
+      { id: 'gemini', name: 'Google Gemini', model: 'gemini-2.0-flash', status: 'inactive', count: 0, accounts: [] },
+      { id: 'groq', name: 'Groq', model: 'llama-3.3-70b', status: 'inactive', count: 0, accounts: [] },
+      { id: 'openai', name: 'OpenAI', model: 'gpt-4o-mini', status: 'inactive', count: 0, accounts: [] },
+      { id: 'claude', name: 'Claude', model: 'claude-3-haiku', status: 'inactive', count: 0, accounts: [] },
+      { id: 'openrouter', name: 'OpenRouter', model: 'llama-3.3-70b:free', status: 'inactive', count: 0, accounts: [] },
+      { id: 'mistral', name: 'Mistral AI', model: 'mistral-small-latest', status: 'inactive', count: 0, accounts: [] },
+      { id: 'cerebras', name: 'Cerebras', model: 'llama-3.3-70b', status: 'inactive', count: 0, accounts: [] },
+      { id: 'cohere', name: 'Cohere', model: 'command-r7b', status: 'inactive', count: 0, accounts: [] },
+      { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', status: 'inactive', count: 0, accounts: [] },
+      { id: 'together', name: 'Together AI', model: 'llama-3.3-70b-turbo-free', status: 'inactive', count: 0, accounts: [] }
     ];
   }
   
@@ -61,6 +61,8 @@ class ProviderRouter {
         'inactive': 'Không hoạt động',
         'active': 'Hoạt động',
         'rate_limited': 'Quá tải',
+        'throttled': 'Chạm trần RPM',
+        'disabled': 'Đã tắt',
         'error': 'Lỗi'
       };
       const statusText = statusMap[p.status] || p.status;
@@ -70,10 +72,25 @@ class ProviderRouter {
         'inactive': 'inactive',
         'active': 'active',
         'rate_limited': 'warning',
+        'throttled': 'warning',
+        'disabled': 'inactive',
         'error': 'error'
       };
       const cssStatus = cssStatusMap[p.status] || p.status;
       
+      // Với nhiều tài khoản, con số gộp một mình là vô dụng: "Quá tải" không cho biết một
+      // trong bốn key hỏng hay cả bốn — mà đó là câu hỏi duy nhất cần trả lời trước khi đi
+      // mua thêm key. Nên liệt kê từng key khi nhà đó có hơn một.
+      const accountRows = p.accounts.length > 1
+        ? `<div class="provider-accounts">${p.accounts.map(a => `
+            <div class="account-row">
+                <span class="status-dot ${cssStatusMap[a.status] || 'inactive'}"></span>
+                <span class="account-label">${a.label}</span>
+                <span class="account-key">${a.key}</span>
+                <span class="account-note">${a.cooldownRemaining ? `nghỉ ${a.cooldownRemaining}s` : `${a.requestCount}/${a.maxRPM}`}</span>
+            </div>`).join('')}</div>`
+        : '';
+
       card.innerHTML = `
         <div class="provider-header">
             <span class="provider-name">${p.name}</span>
@@ -84,8 +101,9 @@ class ProviderRouter {
         </div>
         <div class="provider-stats">
             <span>Mô hình: ${p.model}</span>
-            <span>Yêu cầu: ${p.count}</span>
+            <span>${p.accounts.length > 1 ? `${p.readyCount}/${p.accounts.length} khóa · ` : ''}Yêu cầu: ${p.count}</span>
         </div>
+        ${accountRows}
       `;
       
       this.cardsContainer.appendChild(card);
@@ -99,6 +117,8 @@ class ProviderRouter {
       if (provider) {
         provider.status = status.status;
         provider.count = status.requestCount || provider.count;
+        provider.accounts = status.accounts || [];
+        provider.readyCount = status.readyCount || 0;
         if (status.model) provider.model = status.model;
       }
     }
@@ -117,11 +137,19 @@ class ProviderRouter {
   // Khởi tạo trạng thái dựa trên API keys đã cung cấp
   syncWithKeys(keys) {
     this.providers.forEach(p => {
-      if (keys[p.id]) {
-        p.status = 'active';
-      } else {
-        p.status = 'inactive';
-      }
+      const list = keys[p.id] ? [].concat(keys[p.id]) : [];
+      p.status = list.length ? 'active' : 'inactive';
+      // Trạng thái thật của từng key chỉ có ở server; ở đây chỉ đủ để vẽ ra số lượng trước
+      // lượt gọi đầu tiên.
+      p.accounts = list.map((_, i) => ({
+        label: `${p.id}#${i + 1}`,
+        key: '••••',
+        status: 'active',
+        requestCount: 0,
+        maxRPM: 0,
+        cooldownRemaining: 0
+      }));
+      p.readyCount = list.length;
     });
     this.renderCards();
   }

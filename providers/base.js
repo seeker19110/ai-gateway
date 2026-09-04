@@ -1,16 +1,21 @@
 const { UpstreamError, upstreamErrorMessage } = require('../lib/errors');
-const { cooldownFor } = require('../lib/failover');
 const { parseSSEJson } = require('../lib/sse');
-
-const RPM_WINDOW_MS = 60_000;
+const { readRateLimit } = require('../lib/ratelimit');
+const { CANONICAL, toOpenAI } = require('../lib/params');
 
 /**
- * Một nhà cung cấp trong pool.
+ * Một nhà cung cấp: bộ chuyển ngữ sang API của một hãng.
  *
- * Provider chỉ làm hai việc: gọi upstream, và ném `UpstreamError` mang mã HTTP thật.
- * Provider KHÔNG tự quyết định cooldown — đó là việc của router, nơi duy nhất nhìn thấy
- * cả pool. Trước đây mỗi provider tự gọi `setCooldown(60)` cho riêng mình, nên không có
- * chỗ nào áp được một chính sách nhất quán.
+ * Provider làm ba việc: gọi upstream, ném `UpstreamError` mang mã HTTP thật, và **khai
+ * báo nó nói được phương ngữ gì**. Nó KHÔNG giữ trạng thái của lượt gọi — cooldown, cửa
+ * sổ RPM, dấu LRU đều nằm ở `Account`, vì hạn mức được cấp cho từng API key chứ không cho
+ * cả hãng. Trước đây trạng thái nằm ở đây, nên một key hết quota là cả hãng chết theo, kể
+ * cả khi ba key còn lại vẫn nguyên hạn mức.
+ *
+ * `paramSupport` là phần "đúng chuẩn cho từng nhà cung cấp": mỗi hãng nhận một tập tham
+ * số khác nhau và vài hãng (Cerebras) trả 400 cho tham số lạ thay vì bỏ qua. Gửi bừa cả
+ * bộ tham số OpenAI cho tất cả nghĩa là những hãng khắt khe nhất sẽ hỏng ở đúng những
+ * request có đặt tham số.
  */
 class BaseProvider {
   constructor(name, displayName, options = {}) {
@@ -19,116 +24,56 @@ class BaseProvider {
     this.model = options.model || '';
     this.maxRPM = options.maxRPM || 10;
 
-    this.status = 'inactive'; // inactive | active | rate_limited | error
-    this.lastError = null;
-    this.lastFailureStatus = 0;
-    this.cooldownUntil = 0;
-
-    // Cửa sổ đếm request trượt theo thời gian, tính lười khi cần.
-    // Bản cũ dùng `setInterval` mỗi 60s cho MỖI provider và không bao giờ `clearInterval`:
-    // 10 timer sống mãi, giữ process không thoát được và làm test treo.
-    this.requestCount = 0;
-    this.windowStartedAt = Date.now();
-
-    // Lần cuối được chọn làm ứng viên đầu tiên. Router xoay vòng theo LRU trên trường này.
-    this.lastUsedAt = 0;
+    // Phương ngữ body/response: openai | gemini | anthropic | cohere.
+    this.dialect = options.dialect || 'openai';
+    // Tham số hãng này thật sự nhận (mặc định: cả bộ của OpenAI).
+    this.paramSupport = options.paramSupport || CANONICAL;
+    // Tên khác cho cùng một tham số, ví dụ Mistral gọi `seed` là `random_seed`.
+    this.paramRename = options.paramRename || {};
+    // Khoảng giá trị hẹp hơn mặc định, ví dụ Anthropic chỉ nhận `temperature` tới 1.
+    this.paramRanges = options.paramRanges || undefined;
+    // `stream_options: {include_usage:true}` — chỉ hãng nào hiểu mới được nhận, hãng khác
+    // hoặc bỏ qua (mất gì đâu) hoặc trả 400 (mất cả request).
+    this.streamUsage = options.streamUsage !== false;
   }
 
-  /** Dọn cửa sổ RPM nếu đã qua 60s kể từ mốc bắt đầu. */
-  _rollRequestWindow(now = Date.now()) {
-    if (now - this.windowStartedAt >= RPM_WINDOW_MS) {
-      this.requestCount = 0;
-      this.windowStartedAt = now;
-    }
-  }
-
-  isCoolingDown(now = Date.now()) {
-    return this.cooldownUntil > now;
-  }
-
-  /** Còn bao nhiêu giây nữa thì hết cooldown (0 nếu đang sẵn sàng). */
-  cooldownRemaining(now = Date.now()) {
-    return this.isCoolingDown(now) ? Math.ceil((this.cooldownUntil - now) / 1000) : 0;
-  }
-
-  isAvailable(now = Date.now()) {
-    if (this.status === 'inactive') return false;
-    if (this.isCoolingDown(now)) return false;
-    this._rollRequestWindow(now);
-    if (this.requestCount >= this.maxRPM) return false;
-    return true;
+  /** Dịch tham số chuẩn OpenAI sang phương ngữ của hãng này. */
+  translateParams(params = {}) {
+    return toOpenAI(params, {
+      allow: this.paramSupport,
+      rename: this.paramRename,
+      ranges: this.paramRanges
+    });
   }
 
   /**
-   * Cho nhà cung cấp nghỉ sau một lỗi. `Retry-After` của upstream ghi đè bảng mặc định:
-   * upstream biết rõ hơn ta khi nào nó sẵn sàng trở lại.
-   */
-  markUnavailable(statusCode, retryAfter = null, now = Date.now()) {
-    const seconds = cooldownFor(statusCode, retryAfter, now);
-    this.cooldownUntil = now + seconds * 1000;
-    this.lastFailureStatus = Number(statusCode) || 0;
-    this.status = 'rate_limited';
-    return seconds;
-  }
-
-  /** Xóa cooldown thủ công (endpoint `/api/providers/reset`). */
-  markHealthy() {
-    this.cooldownUntil = 0;
-    this.lastFailureStatus = 0;
-    this.lastError = null;
-    if (this.status !== 'inactive') this.status = 'active';
-  }
-
-  /**
-   * Ghi nhận một lượt thành công.
+   * Nhà cung cấp có đọc được số giây phải chờ từ THÂN lỗi không?
    *
-   * KHÔNG đụng tới `lastUsedAt`: dấu LRU do router đóng (`_stampUsed`) và phải đơn điệu
-   * tăng. Gán lại `Date.now()` ở đây sẽ ghi đè dấu đó bằng một mốc thô — hai lượt rơi vào
-   * cùng mili-giây là khóa LRU hòa nhau, thứ tự tụt về thứ tự khai báo, và pool kẹt vào
-   * đúng một nhà cung cấp trong khi log vẫn trông bình thường.
+   * Google là ca duy nhất bắt buộc: họ không gửi `Retry-After` mà giấu `retryDelay` trong
+   * `error.details`. Mặc định trả `null` để mọi hãng khác giữ nguyên đường cũ (header).
    */
-  markSuccess() {
-    this.status = 'active';
-    this.lastError = null;
-    this.lastFailureStatus = 0;
+  retryAfterFromBody() {
+    return null;
   }
 
-  async chat(messages, apiKey) {
+  async chat() {
     throw new Error(`Provider ${this.name} chưa cài đặt chat()`);
   }
 
+  /**
+   * Thử một API key. Không đụng tới trạng thái nào: cùng một provider phục vụ nhiều tài
+   * khoản, nên ghi kết quả của một key lên object dùng chung sẽ dán nhãn "hỏng" cho những
+   * key chưa từng được thử.
+   */
   async testConnection(apiKey) {
     try {
-      await this.chat([{ role: 'user', content: 'Say "hello" only.' }], apiKey);
-      this.markHealthy();
-      this.status = 'active';
-      return true;
+      await this.chat([{ role: 'user', content: 'Say "hello" only.' }], apiKey, {
+        params: { max_tokens: 16 }
+      });
+      return { ok: true, message: 'Kết nối thành công!' };
     } catch (error) {
-      this.lastError = error.message;
-      this.lastFailureStatus = error.statusCode || 0;
-      return false;
+      return { ok: false, message: error.message, status: error.statusCode || 0 };
     }
-  }
-
-  trackRequest(now = Date.now()) {
-    this._rollRequestWindow(now);
-    this.requestCount++;
-  }
-
-  getStatus(now = Date.now()) {
-    this._rollRequestWindow(now);
-    return {
-      name: this.name,
-      displayName: this.displayName,
-      status: this.isCoolingDown(now) ? 'rate_limited' : this.status,
-      model: this.model,
-      requestCount: this.requestCount,
-      maxRPM: this.maxRPM,
-      cooldownUntil: this.cooldownUntil || null,
-      cooldownRemaining: this.cooldownRemaining(now),
-      lastFailureStatus: this.lastFailureStatus || null,
-      lastError: this.lastError
-    };
   }
 
   // ---------- gọi HTTP ----------
@@ -140,8 +85,6 @@ class BaseProvider {
    * "ta không hỏi tới nơi" — hai thứ này đáng bị xử lý khác nhau.
    */
   async requestRaw(url, init, { timeoutMs = 120_000 } = {}) {
-    this.trackRequest();
-
     let response;
     try {
       response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
@@ -155,19 +98,24 @@ class BaseProvider {
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new UpstreamError(upstreamErrorMessage(response.status, body), response.status, {
-        retryAfter: response.headers.get('retry-after'),
-        body
+        // Header trước, thân sau: `Retry-After` là câu trả lời chính thức, còn đọc thân là
+        // đường vòng chỉ dành cho hãng không gửi header nào.
+        retryAfter: response.headers.get('retry-after') ?? this.retryAfterFromBody(body),
+        body,
+        rateLimit: readRateLimit(response.headers)
       });
     }
 
     return response;
   }
 
+  /** Như `requestRaw` nhưng parse JSON; trả kèm tín hiệu hạn mức đọc từ header. */
   async request(url, init, options = {}) {
     const response = await this.requestRaw(url, init, options);
+    const rateLimit = readRateLimit(response.headers);
     const raw = await response.text();
     try {
-      return JSON.parse(raw);
+      return { data: JSON.parse(raw), rateLimit };
     } catch {
       throw new UpstreamError(`${this.displayName} trả về JSON không hợp lệ`, 502, { body: raw });
     }
@@ -177,24 +125,29 @@ class BaseProvider {
    * Thân chung cho các nhà cung cấp nói chuẩn OpenAI Chat Completions
    * (Groq, OpenAI, OpenRouter, Mistral, Cerebras, DeepSeek, Together).
    */
-  async openAICompatibleChat(messages, apiKey, { url, headers = {}, body = {} } = {}) {
+  async openAICompatibleChat(messages, apiKey, { url, headers = {}, body = {}, model, params = {} } = {}) {
     if (!apiKey) throw new UpstreamError(`Cần có API key cho ${this.displayName}`, 401);
 
-    const data = await this.request(url, {
+    const { data, rateLimit } = await this.request(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
         ...headers
       },
-      body: JSON.stringify({ model: this.model, messages, ...body })
+      body: JSON.stringify({
+        model: model || this.model,
+        messages,
+        ...this.translateParams(params),
+        ...body
+      })
     });
 
     const text = data?.choices?.[0]?.message?.content;
     if (typeof text !== 'string' || !text) {
       throw new UpstreamError(`${this.displayName} trả về phản hồi rỗng hoặc sai định dạng`, 502);
     }
-    return { text, usage: normalizeUsage(data.usage) };
+    return { text, usage: normalizeUsage(data.usage), rateLimit };
   }
 
   // ---------- stream ----------
@@ -206,12 +159,12 @@ class BaseProvider {
    * kết nối vẫn ném ra ở lần lặp đầu và router bắt được để xoay vòng. Đó là điều kiện để
    * failover trước mẩu đầu tiên hoạt động.
    */
-  async *stream(messages, apiKey) {
+  async *stream() {
     throw new UpstreamError(`${this.displayName} chưa hỗ trợ stream`, 501);
   }
 
   /** Thân stream chung cho các nhà cung cấp chuẩn OpenAI. */
-  async *streamOpenAICompatible(messages, apiKey, { url, headers = {}, body = {} } = {}) {
+  async *streamOpenAICompatible(messages, apiKey, { url, headers = {}, body = {}, model, params = {} } = {}) {
     if (!apiKey) throw new UpstreamError(`Cần có API key cho ${this.displayName}`, 401);
 
     const response = await this.requestRaw(url, {
@@ -223,13 +176,18 @@ class BaseProvider {
         ...headers
       },
       body: JSON.stringify({
-        model: this.model,
+        model: model || this.model,
         messages,
         stream: true,
-        stream_options: { include_usage: true },
+        // Cerebras và Mistral không có tham số này: Cerebras trả 400 cho trường lạ, nên
+        // gửi kèm là hỏng đúng những request đang muốn đếm token.
+        ...(this.streamUsage ? { stream_options: { include_usage: true } } : {}),
+        ...this.translateParams(params),
         ...body
       })
     });
+
+    yield { rateLimit: readRateLimit(response.headers) };
 
     for await (const { payload } of parseSSEJson(response)) {
       const delta = payload?.choices?.[0]?.delta?.content;
@@ -254,4 +212,3 @@ function normalizeUsage(usage) {
 
 module.exports = BaseProvider;
 module.exports.normalizeUsage = normalizeUsage;
-module.exports.RPM_WINDOW_MS = RPM_WINDOW_MS;

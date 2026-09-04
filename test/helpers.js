@@ -1,5 +1,6 @@
 const BaseProvider = require('../providers/base');
 const { UpstreamError, upstreamErrorMessage } = require('../lib/errors');
+const { AccountPool } = require('../lib/pool');
 
 /** Logger im lặng, có ghi lại dòng log để test khẳng định được nội dung. */
 function silentLogger() {
@@ -9,20 +10,32 @@ function silentLogger() {
 }
 
 /**
- * Provider giả: đưa vào một hàng kịch bản, mỗi lượt gọi lấy một cái.
- * Kịch bản là `{ ok: 'text' }`, hoặc `{ status, body?, retryAfter? }`, hoặc `{ network: true }`.
+ * Provider giả: mỗi API key có một hàng kịch bản riêng, mỗi lượt gọi lấy một cái.
+ *
+ * Kịch bản theo KEY chứ không theo provider, vì đó chính là thứ cần kiểm chứng ở bản này:
+ * hai key của cùng một nhà cung cấp phải hỏng và hồi phục độc lập với nhau.
+ *
+ * Mỗi bước là `{ ok: 'text' }`, `{ status, body?, retryAfter?, rateLimit? }`,
+ * `{ network: true }`, hoặc (chỉ cho stream) `{ chunks: [...], thenFail? }`.
  */
 class FakeProvider extends BaseProvider {
-  constructor(name, script = [], options = {}) {
+  constructor(name, scripts = {}, options = {}) {
     super(name, name.toUpperCase(), { model: `${name}-model`, maxRPM: options.maxRPM || 100 });
-    this.script = [...script];
+    this.scripts = new Map(Object.entries(scripts).map(([key, steps]) => [key, [...steps]]));
     this.calls = 0;
-    this.status = 'active';
+    this.callsByKey = new Map();
+    this.seenParams = [];
+    this.seenModels = [];
   }
 
-  async chat() {
+  _next(apiKey, options = {}) {
     this.calls++;
-    const step = this.script.shift() || { ok: `${this.name} mặc định` };
+    this.callsByKey.set(apiKey, (this.callsByKey.get(apiKey) || 0) + 1);
+    this.seenParams.push(options.params || {});
+    this.seenModels.push(options.model || this.model);
+
+    const queue = this.scripts.get(apiKey);
+    const step = (queue && queue.shift()) || { ok: `${this.name} mặc định` };
 
     if (step.network) {
       throw new UpstreamError(`mạng hỏng ở ${this.name}`, 503, { isNetworkError: true });
@@ -35,33 +48,25 @@ class FakeProvider extends BaseProvider {
         : `${this.name} lỗi ${step.status}`;
       throw new UpstreamError(message, step.status, {
         body: step.body || '',
-        retryAfter: step.retryAfter || null
+        retryAfter: step.retryAfter || null,
+        rateLimit: step.rateLimit || null
       });
     }
-    return { text: step.ok, usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
+    return step;
   }
 
-  /**
-   * Kịch bản stream thêm hai dạng:
-   * - `{ chunks: ['a','b'] }` — phát từng mẩu rồi kết thúc bình thường.
-   * - `{ chunks: [...], thenFail: 500 }` — phát vài mẩu rồi đứt GIỮA stream.
-   */
-  async *stream() {
-    this.calls++;
-    const step = this.script.shift() || { ok: `${this.name} mặc định` };
+  async chat(messages, apiKey, options = {}) {
+    const step = this._next(apiKey, options);
+    return {
+      text: step.ok,
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      rateLimit: step.rateLimit || null
+    };
+  }
 
-    if (step.network) {
-      throw new UpstreamError(`mạng hỏng ở ${this.name}`, 503, { isNetworkError: true });
-    }
-    if (step.status) {
-      const message = step.body
-        ? upstreamErrorMessage(step.status, step.body)
-        : `${this.name} lỗi ${step.status}`;
-      throw new UpstreamError(message, step.status, {
-        body: step.body || '',
-        retryAfter: step.retryAfter || null
-      });
-    }
+  async *stream(messages, apiKey, options = {}) {
+    const step = this._next(apiKey, options);
+    yield { rateLimit: step.rateLimit || null };
 
     for (const text of step.chunks || [step.ok]) {
       yield { text };
@@ -73,13 +78,29 @@ class FakeProvider extends BaseProvider {
   }
 }
 
-/** Pool provider giả theo thứ tự khai báo. */
-function fakePool(spec) {
-  const pool = {};
-  for (const [name, script] of Object.entries(spec)) {
-    pool[name] = new FakeProvider(name, script);
+/**
+ * Dựng pool giả từ một đặc tả gọn.
+ *
+ * `{ a: [kịch bản] }`                → nhà `a` với đúng một tài khoản (`key-a-1`).
+ * `{ a: { 'k1': [...], 'k2': [...] } }` → nhà `a` với hai tài khoản, mỗi key một kịch bản.
+ */
+function fakePool(spec, { strategy = 'account', env = {} } = {}) {
+  const providers = {};
+  const fakeEnv = { ...env };
+
+  for (const [name, value] of Object.entries(spec)) {
+    const scripts = Array.isArray(value) ? { [`key-${name}-1`]: value } : value;
+    providers[name] = new FakeProvider(name, scripts);
+    fakeEnv[`${name.toUpperCase()}_API_KEYS`] = Object.keys(scripts).join(',');
   }
-  return pool;
+
+  const pool = new AccountPool(providers, { env: fakeEnv, strategy });
+  return { providers, pool, env: fakeEnv };
+}
+
+/** Tài khoản thứ `index` của một nhà cung cấp — chỗ giữ cooldown/RPM trong pool. */
+function acct(pool, name, index = 0) {
+  return pool.accountsOf(name)[index];
 }
 
 /** Thay `global.fetch` bằng một hàm kịch bản; trả về hàm hoàn tác. */
@@ -104,4 +125,4 @@ function jsonResponse(status, body, headers = {}) {
   };
 }
 
-module.exports = { FakeProvider, fakePool, silentLogger, stubFetch, jsonResponse };
+module.exports = { FakeProvider, fakePool, acct, silentLogger, stubFetch, jsonResponse };
