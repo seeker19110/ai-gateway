@@ -200,12 +200,39 @@ test('GET /health cho biết bao nhiêu nhà và bao nhiêu tài khoản đang s
     acct(pool, 'b').markUnavailable(429);
     acct(pool, 'a', 0).markUnavailable(429);
 
-    const { body } = await call('/health');
+    const { status, body } = await call('/health');
+    assert.equal(status, 200, 'còn ít nhất một nhà dùng được thì vẫn khỏe');
     assert.equal(body.service, 'ai-gateway');
     assert.equal(body.total, 2);
     assert.equal(body.ready, 1, 'a vẫn còn một key dùng được');
     assert.equal(body.accounts, 3);
     assert.equal(body.accountsReady, 1);
+  });
+});
+
+test('GET /health trả 503 khi KHÔNG còn nhà cung cấp nào sẵn sàng', async () => {
+  await withServer({ a: [], b: [] }, async (call, { pool }) => {
+    acct(pool, 'a').markUnavailable(429);
+    acct(pool, 'b').markUnavailable(429);
+
+    const { status, body } = await call('/health');
+    assert.equal(status, 503, 'orchestrator phải thấy gateway không phục vụ được request nào');
+    assert.equal(body.ready, 0);
+  });
+});
+
+test('POST /api/chat: JSON gửi lên hỏng cú pháp thì 400 JSON rõ ràng, không phải trang lỗi HTML', async () => {
+  await withServer({ a: [] }, async (_call, _p, base) => {
+    const res = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{message: "thiếu ngoặc kép"'
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.headers.get('content-type') || '', /application\/json/);
+    const body = await res.json();
+    assert.equal(body.error.status, 400);
+    assert.doesNotMatch(JSON.stringify(body), /body-parser|node_modules|at JSON\.parse/, 'không được rò stack trace');
   });
 });
 
