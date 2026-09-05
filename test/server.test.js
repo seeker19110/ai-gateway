@@ -424,6 +424,50 @@ test('client auth: /api/providers/* và /api/claude/oauth/* không bị ảnh h�
   }, { env });
 });
 
+// ---------- rate limit (GATEWAY_RATE_LIMIT_RPM) ----------
+
+test('rate limit: không đặt GATEWAY_RATE_LIMIT_RPM thì không giới hạn gì', async () => {
+  await withServer({ a: [{ ok: 'chào' }] }, async (call) => {
+    for (let i = 0; i < 10; i += 1) {
+      assert.equal((await call('/api/chat', json({ message: 'chào' }))).status, 200);
+    }
+  });
+});
+
+test('rate limit: vượt GATEWAY_RATE_LIMIT_RPM thì 429 kèm Retry-After, đúng hạn mức thì vẫn qua', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_RATE_LIMIT_RPM: '2' };
+  await withServer({ a: [{ ok: 'chào' }, { ok: 'chào' }, { ok: 'chào' }] }, async (_call, _p, base) => {
+    const first = await fetch(`${base}/api/chat`, json({ message: 'chào' }));
+    const second = await fetch(`${base}/api/chat`, json({ message: 'chào' }));
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+
+    const third = await fetch(`${base}/api/chat`, json({ message: 'chào' }));
+    assert.equal(third.status, 429);
+    assert.ok(Number(third.headers.get('retry-after')) > 0);
+    assert.match((await third.json()).error.message, /GATEWAY_RATE_LIMIT_RPM/);
+  }, { env });
+});
+
+test('rate limit: mỗi API key có hạn mức riêng, không lẫn vào client khác', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_RATE_LIMIT_RPM: '1', GATEWAY_API_KEYS: 'key-a,key-b' };
+  await withServer({ a: [{ ok: 'chào' }, { ok: 'chào' }] }, async (_call, _p, base) => {
+    const callWith = (key) => fetch(`${base}/api/chat`, { ...json({ message: 'chào' }), headers: { ...json({}).headers, Authorization: `Bearer ${key}` } });
+
+    assert.equal((await callWith('key-a')).status, 200);
+    assert.equal((await callWith('key-a')).status, 429, 'key-a đã hết hạn mức');
+    assert.equal((await callWith('key-b')).status, 200, 'key-b chưa từng gọi, không bị ảnh hưởng bởi key-a');
+  }, { env });
+});
+
+test('rate limit: /api/providers/status không bị ảnh hưởng bởi GATEWAY_RATE_LIMIT_RPM', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_RATE_LIMIT_RPM: '1' };
+  await withServer({ a: [] }, async (call) => {
+    await call('/api/providers/status');
+    assert.equal((await call('/api/providers/status')).status, 200, 'endpoint quản trị không nằm trong phạm vi GATEWAY_RATE_LIMIT_RPM');
+  }, { env });
+});
+
 // ---------- /metrics ----------
 
 test('GET /metrics: phơi số request theo method/route/status ở khuôn Prometheus', async () => {

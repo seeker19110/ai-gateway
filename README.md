@@ -6,7 +6,7 @@ tài khoản khác khi cái đang dùng hết quota, hỏng, hoặc không trả
 
 Nhà cung cấp: Gemini, Groq, OpenAI, Claude, OpenRouter, Mistral, Cerebras, Cohere, DeepSeek, Together.
 
-License: [MIT](LICENSE).
+License: [MIT](LICENSE). Lịch sử thay đổi: [CHANGELOG.md](CHANGELOG.md).
 
 ## Đơn vị xoay vòng là tài khoản, không phải nhà cung cấp
 
@@ -202,6 +202,7 @@ npm install
 cp .env.example .env     # điền API key nào có; nhà không có key thì tự động nằm ngoài pool
 npm start                # http://localhost:3000
 npm test                 # không gọi mạng: fetch được stub
+npm run lint              # eslint — bắt lỗi thật (biến chưa dùng, chưa khai báo), không áp phong cách
 ```
 
 Không cần điền đủ. Nhà cung cấp nào không có key thì ở trạng thái `inactive` và không bao
@@ -219,6 +220,10 @@ Image chạy bằng user `node` (không phải root), chỉ mang theo `node_modu
 `~/.ai-gateway` bên trong container: mount một volume vào đó nếu muốn cooldown sống qua việc
 container bị thay mới (`docker run -v ai-gateway-state:/home/node/.ai-gateway ...`), không thì
 container mới coi như chưa từng nghỉ tài khoản nào.
+
+Có sẵn `HEALTHCHECK` gọi `GET /health` bằng `node` (không cài thêm curl/wget) — phát hiện được
+cả "container không chạy" lẫn "container chạy nhưng pool đã kiệt hoàn toàn" (`/health` tự trả
+503 khi đó, xem mục "Endpoint"). `docker ps` hiện trạng thái `healthy`/`unhealthy` tương ứng.
 
 ## Quan sát
 
@@ -298,6 +303,20 @@ Nhiều key hợp lệ cùng lúc nghĩa là mỗi client (mỗi ứng dụng, m
 key riêng — thu hồi được key của một client mà không ảnh hưởng những client còn lại. Không
 đặt biến nào thì mọi thứ giữ nguyên như trước, không cần cấu hình gì thêm để chạy `npm start`
 lần đầu — nhưng gateway sẽ ghi một dòng cảnh báo lúc khởi động để nhắc việc này.
+
+`GATEWAY_API_KEY` chỉ chặn truy cập **trái phép** — nó không chặn một client **hợp lệ** gọi
+dồn dập (vòng lặp retry hỏng, script quên giới hạn riêng). Đặt thêm `GATEWAY_RATE_LIMIT_RPM`
+để giới hạn số request/phút cho mỗi client — đếm theo API key nếu `GATEWAY_API_KEY` đang bật,
+hoặc theo IP nếu chưa:
+
+```bash
+GATEWAY_RATE_LIMIT_RPM=60
+```
+
+Vượt hạn mức thì nhận **429** kèm header `Retry-After`. Đây là giới hạn ở tầng gateway cho
+CLIENT, khác với cửa sổ RPM đã có sẵn cho từng TÀI KHOẢN upstream (xem "Giới hạn đã biết") —
+hai thứ đo hai chiều khác nhau và không thay thế được cho nhau. Không đặt biến thì không giới
+hạn gì, giữ nguyên hành vi cũ.
 
 ### Bảo vệ endpoint quản trị
 
@@ -425,6 +444,7 @@ lib/sse.js         đọc Server-Sent Events, dùng chung cho cả 4 định d�
 lib/store.js       lưu cooldown xuống đĩa để sống qua restart
 lib/providers.js   dựng 10 nhà cung cấp, đọc model/RPM ghi đè từ .env
 lib/metrics.js     bộ đếm request trong bộ nhớ, phơi ra khuôn Prometheus text
+lib/rateLimiter.js giới hạn request/phút cho một client (GATEWAY_RATE_LIMIT_RPM)
 lib/app.js         express app (test dựng app riêng, không đụng cổng thật)
 providers/base.js  gọi HTTP, chuẩn hóa lỗi, khai báo phương ngữ + tham số nhận được
 server.js          mở cổng, log/thoát an toàn khi có lỗi không bắt được, đóng êm khi có SIGTERM/SIGINT

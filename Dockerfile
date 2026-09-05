@@ -19,4 +19,11 @@ COPY server.js package.json ./
 USER node
 
 EXPOSE 3000
+
+# Dùng `node` sẵn có để gọi /health thay vì cài thêm curl/wget vào image — /health đã tự
+# trả 503 khi không còn nhà cung cấp nào sẵn sàng (xem lib/app.js), nên healthcheck này
+# phát hiện được cả "container không chạy" lẫn "container chạy nhưng pool đã kiệt".
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
 CMD ["node", "server.js"]
