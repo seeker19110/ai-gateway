@@ -48,6 +48,19 @@ class SettingsManager {
       
       // Textarea chứ không phải một ô một dòng: nhiều tài khoản là chuyện bình thường ở
       // đây, và mỗi key một dòng là cách gõ tự nhiên nhất cho việc đó.
+      // Claude có thêm lối vào thứ hai: đăng nhập subscription (Pro/Max) qua OAuth, không
+      // cần dán tay API key — dành cho máy không có sẵn Claude Code CLI (`claude login`).
+      const subscriptionRow = provider === 'claude'
+        ? `
+        <div class="claude-subscription-row" style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+            <span id="claude-sub-status" style="font-size:0.8rem;">Chưa đăng nhập subscription</span>
+            <div>
+              <button type="button" id="btn-claude-login" class="btn btn-secondary">Đăng nhập bằng tài khoản Claude</button>
+              <button type="button" id="btn-claude-logout" class="btn btn-secondary" style="display:none;">Đăng xuất</button>
+            </div>
+        </div>`
+        : '';
+
       item.innerHTML = `
         <div class="api-key-header">
             <label>${this.providerLabels[provider]}</label>
@@ -59,25 +72,29 @@ class SettingsManager {
             <span id="status-${provider}" style="font-size: 0.8rem; margin-top: 10px;"></span>
             <button type="button" class="btn btn-secondary test-btn" data-provider="${provider}">Kiểm tra</button>
         </div>
+        ${subscriptionRow}
       `;
-      
+
       this.container.appendChild(item);
     });
   }
-  
+
   bindEvents() {
-    this.btnOpen.addEventListener('click', () => this.openModal());
+    this.btnOpen.addEventListener('click', () => {
+      this.openModal();
+      this.refreshClaudeSubscriptionStatus();
+    });
     this.btnClose.addEventListener('click', () => this.closeModal());
     this.btnSave.addEventListener('click', () => {
       this.saveKeys();
       this.closeModal();
     });
-    
+
     // Close on clicking outside
     this.modal.addEventListener('click', (e) => {
       if (e.target === this.modal) this.closeModal();
     });
-    
+
     // Ô nhập tự cao dần theo số dòng key.
     document.querySelectorAll('.api-key-input').forEach(input => {
       const grow = () => {
@@ -86,7 +103,7 @@ class SettingsManager {
       };
       input.addEventListener('input', grow);
     });
-    
+
     // Test connections
     document.querySelectorAll('.test-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
@@ -94,6 +111,71 @@ class SettingsManager {
         await this.testConnection(provider);
       });
     });
+
+    document.getElementById('btn-claude-login')?.addEventListener('click', () => this.startClaudeLogin());
+    document.getElementById('btn-claude-logout')?.addEventListener('click', () => this.claudeLogout());
+  }
+
+  /**
+   * Đăng nhập subscription: mở tab đăng nhập của Anthropic, rồi hỏi người dùng dán lại mã
+   * mà trang đó hiện ra. Không có redirect nào chạm lại vào gateway — Anthropic chỉ khai
+   * báo sẵn `console.anthropic.com` làm nơi nhận, gateway không tự host được URL redirect
+   * riêng, nên bước "dán mã" là cách duy nhất khép kín vòng OAuth ở đây.
+   */
+  async startClaudeLogin() {
+    const statusEl = document.getElementById('claude-sub-status');
+    try {
+      const res = await fetch('/api/claude/oauth/start', { method: 'POST' });
+      const { url, state } = await res.json();
+      window.open(url, '_blank', 'noopener');
+
+      const pasted = window.prompt('Đăng nhập ở tab vừa mở, sau đó dán lại mã Anthropic hiện ra (dạng "code#state"):');
+      if (!pasted) return;
+
+      statusEl.textContent = 'Đang xác thực...';
+      const cb = await fetch('/api/claude/oauth/callback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: pasted, state })
+      });
+      const data = await cb.json();
+      if (!cb.ok) throw new Error(data?.error?.message || 'Đăng nhập thất bại');
+
+      await this.refreshClaudeSubscriptionStatus();
+    } catch (err) {
+      statusEl.textContent = `❌ ${err.message}`;
+      statusEl.style.color = 'var(--error)';
+    }
+  }
+
+  async claudeLogout() {
+    await fetch('/api/claude/oauth', { method: 'DELETE' });
+    await this.refreshClaudeSubscriptionStatus();
+  }
+
+  async refreshClaudeSubscriptionStatus() {
+    const statusEl = document.getElementById('claude-sub-status');
+    const loginBtn = document.getElementById('btn-claude-login');
+    const logoutBtn = document.getElementById('btn-claude-logout');
+    if (!statusEl) return;
+
+    try {
+      const res = await fetch('/api/claude/oauth/status');
+      const data = await res.json();
+      if (data.loggedIn) {
+        statusEl.textContent = '✅ Đã đăng nhập subscription qua gateway';
+        statusEl.style.color = 'var(--success)';
+        loginBtn.style.display = 'none';
+        logoutBtn.style.display = '';
+      } else {
+        statusEl.textContent = 'Chưa đăng nhập subscription';
+        statusEl.style.color = 'var(--text-secondary)';
+        loginBtn.style.display = '';
+        logoutBtn.style.display = 'none';
+      }
+    } catch {
+      statusEl.textContent = 'Không kiểm tra được trạng thái đăng nhập';
+    }
   }
   
   openModal() {

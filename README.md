@@ -31,6 +31,25 @@ subscription, gateway tự đọc token từ `~/.claude/.credentials.json` (hay
 cần copy tay, không cần biến môi trường nào. Token hết hạn thì gateway lặng lẽ bỏ qua, y như
 chưa đăng nhập.
 
+**Máy không có Claude Code CLI?** Gateway tự đăng nhập được, đi đúng luồng OAuth (PKCE) mà
+bản thân CLI dùng — không cần cài thêm gì:
+
+1. Mở web UI → **Cài đặt API** → mục Anthropic Claude → **Đăng nhập bằng tài khoản Claude**.
+   Gateway mở một tab tới trang đăng nhập của Anthropic.
+2. Đăng nhập xong, Anthropic hiện một mã trên trang (dạng `code#state`) — copy và dán lại
+   vào ô mà gateway hỏi. (Anthropic chỉ khai báo sẵn `console.anthropic.com` làm nơi nhận
+   redirect, gateway không tự host được URL riêng, nên đây là bước thủ công duy nhất.)
+3. Token được lưu ở `~/.ai-gateway/claude-subscription.json` (0600, cùng thư mục với
+   cooldown), gateway tự làm mới token này mỗi 5 phút trước khi nó hết hạn — miễn là còn
+   `refresh_token`, không cần đăng nhập lại.
+
+Ba nguồn tài khoản subscription cho Claude — API key thường, token CLI đã đăng nhập sẵn,
+token gateway tự đăng nhập — chỉ lấy ĐÚNG MỘT nguồn subscription mỗi lượt cấu hình (CLI có
+trước thì ưu tiên CLI) để không đếm trùng cùng một tài khoản.
+
+Endpoint tương ứng: `POST /api/claude/oauth/start`, `POST /api/claude/oauth/callback`,
+`GET /api/claude/oauth/status`, `DELETE /api/claude/oauth` (đăng xuất).
+
 ### Dạng proxy MCP
 
 Gateway lộ thêm một endpoint MCP (Model Context Protocol) tại `/mcp`, nói đúng transport
