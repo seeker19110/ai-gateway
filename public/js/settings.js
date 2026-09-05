@@ -1,25 +1,40 @@
 /**
- * `fetch` cho các endpoint quản trị (`/api/providers/*`, `/api/claude/oauth/*`), tự gắn
- * `X-Admin-Token` nếu người dùng đã từng nhập. Không đụng gì khi gateway chưa bật
- * `GATEWAY_ADMIN_TOKEN` — request đi qua bình thường vì server bỏ qua header không cần đến.
+ * `fetch` tự gắn một token từ `localStorage` vào header cho trước, và hỏi lại qua hộp thoại
+ * khi gặp `401` (token thiếu/sai) rồi thử lại đúng một lần. Không đụng gì khi gateway chưa
+ * bật xác thực tương ứng — request đi qua bình thường vì server bỏ qua header không cần đến.
  *
- * Gặp 401 (token thiếu/sai) mới hỏi, không hỏi trước: đa số gateway chạy nội bộ không bật
- * token này, và hỏi trước ở MỌI lượt mở modal cài đặt sẽ làm phiền đúng những người không
- * cần nó.
+ * Hỏi SAU khi gặp 401, không hỏi trước: đa số gateway chạy nội bộ không bật token nào, và
+ * hỏi trước ở MỌI lượt sẽ làm phiền đúng những người không cần nó.
  */
-async function adminFetch(url, options = {}) {
-  const token = localStorage.getItem('aigateway_admin_token');
-  const withToken = (t) => ({ ...options, headers: { ...(options.headers || {}), ...(t ? { 'X-Admin-Token': t } : {}) } });
+function makeTokenFetch({ storageKey, header, promptText }) {
+  return async function tokenFetch(url, options = {}) {
+    const token = localStorage.getItem(storageKey);
+    const withToken = (t) => ({ ...options, headers: { ...(options.headers || {}), ...(t ? { [header]: t } : {}) } });
 
-  let res = await fetch(url, withToken(token));
-  if (res.status === 401) {
-    const entered = window.prompt('Endpoint quản trị này yêu cầu admin token (GATEWAY_ADMIN_TOKEN của gateway). Dán token vào đây:');
-    if (!entered) return res;
-    localStorage.setItem('aigateway_admin_token', entered);
-    res = await fetch(url, withToken(entered));
-  }
-  return res;
+    let res = await fetch(url, withToken(token));
+    if (res.status === 401) {
+      const entered = window.prompt(promptText);
+      if (!entered) return res;
+      localStorage.setItem(storageKey, entered);
+      res = await fetch(url, withToken(entered));
+    }
+    return res;
+  };
 }
+
+/** Cho `/api/providers/*` và `/api/claude/oauth/*` — xem GATEWAY_ADMIN_TOKEN trong README. */
+const adminFetch = makeTokenFetch({
+  storageKey: 'aigateway_admin_token',
+  header: 'X-Admin-Token',
+  promptText: 'Endpoint quản trị này yêu cầu admin token (GATEWAY_ADMIN_TOKEN của gateway). Dán token vào đây:'
+});
+
+/** Cho `/api/chat` — xem GATEWAY_API_KEY/GATEWAY_API_KEYS trong README. */
+const clientFetch = makeTokenFetch({
+  storageKey: 'aigateway_client_key',
+  header: 'X-Api-Key',
+  promptText: 'Gateway này yêu cầu một API key riêng (GATEWAY_API_KEY của gateway, khác với key của các nhà cung cấp AI). Dán vào đây:'
+});
 
 class SettingsManager {
   constructor() {

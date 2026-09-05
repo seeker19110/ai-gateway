@@ -367,6 +367,9 @@ test('admin auth: đặt GATEWAY_ADMIN_TOKEN thì thiếu/sai token bị chặn 
 
     const oauthNoAuth = await call('/api/claude/oauth/status');
     assert.equal(oauthNoAuth.status, 401, '/api/claude/oauth/* cũng phải bị chặn');
+
+    const metricsNoAuth = await call('/metrics');
+    assert.equal(metricsNoAuth.status, 401, '/metrics cũng phải bị chặn');
   }, { env });
 });
 
@@ -375,6 +378,81 @@ test('admin auth: /api/chat và /v1/chat/completions vẫn mở dù đã đặt 
   await withServer({ a: [{ ok: 'chào' }] }, async (call) => {
     const chat = await call('/api/chat', json({ message: 'chào' }));
     assert.equal(chat.status, 200, 'endpoint chính của gateway không được đòi admin token');
+  }, { env });
+});
+
+// ---------- client auth (GATEWAY_API_KEY/_KEYS) ----------
+
+test('client auth: không đặt GATEWAY_API_KEY(S) thì /api/chat, /v1/chat/completions, /mcp vẫn mở như cũ', async () => {
+  await withServer({ a: [{ ok: 'chào' }] }, async (call, _p, base) => {
+    assert.equal((await call('/api/chat', json({ message: 'chào' }))).status, 200);
+    assert.equal(
+      (await call('/v1/chat/completions', json({ messages: [{ role: 'user', content: 'chào' }] }))).status,
+      200
+    );
+    const mcp = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' })
+    });
+    assert.equal(mcp.status, 200);
+  });
+});
+
+test('client auth: đặt GATEWAY_API_KEY(S) thì thiếu/sai key bị chặn 401, đúng key thì qua', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_API_KEYS: 'key-mot,key-hai' };
+  await withServer({ a: [{ ok: 'chào' }] }, async (call, _p, base) => {
+    const noAuth = await call('/api/chat', json({ message: 'chào' }));
+    assert.equal(noAuth.status, 401);
+    assert.match(noAuth.body.error.message, /GATEWAY_API_KEY/);
+
+    const wrongKey = await fetch(`${base}/api/chat`, { ...json({ message: 'chào' }), headers: { ...json({}).headers, Authorization: 'Bearer sai-key' } });
+    assert.equal(wrongKey.status, 401);
+
+    const rightBearer = await fetch(`${base}/api/chat`, { ...json({ message: 'chào' }), headers: { ...json({}).headers, Authorization: 'Bearer key-hai' } });
+    assert.equal(rightBearer.status, 200, 'key thứ hai trong danh sách cũng phải dùng được');
+
+    const rightHeader = await fetch(`${base}/api/chat`, { ...json({ message: 'chào' }), headers: { ...json({}).headers, 'X-Api-Key': 'key-mot' } });
+    assert.equal(rightHeader.status, 200, 'header X-Api-Key phải dùng được thay cho Authorization');
+  }, { env });
+});
+
+test('client auth: /api/providers/* và /api/claude/oauth/* không bị ảnh hưởng bởi GATEWAY_API_KEY', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_API_KEYS: 'key-mot' };
+  await withServer({ a: [] }, async (call) => {
+    assert.equal((await call('/api/providers/status')).status, 200, 'GATEWAY_API_KEY không phải là GATEWAY_ADMIN_TOKEN');
+  }, { env });
+});
+
+// ---------- /metrics ----------
+
+test('GET /metrics: phơi số request theo method/route/status ở khuôn Prometheus', async () => {
+  // Thân `/metrics` là text/plain, không phải JSON, nên gọi bằng `fetch` thô thay vì qua
+  // helper `call()` (vốn luôn `res.json()`).
+  await withServer({ a: [{ ok: 'chào' }] }, async (_call, _p, base) => {
+    await fetch(`${base}/api/chat`, json({ message: 'chào' }));
+    await fetch(`${base}/api/chat`, json({}));
+
+    const res = await fetch(`${base}/metrics`);
+    assert.match(res.headers.get('content-type') || '', /text\/plain/);
+    const text = await res.text();
+    assert.match(text, /ai_gateway_http_requests_total\{method="POST",route="\/api\/chat",status="200"\} 1/);
+    assert.match(text, /ai_gateway_http_requests_total\{method="POST",route="\/api\/chat",status="400"\} 1/);
+  });
+});
+
+test('GET /metrics: route vẫn đúng khi request bị chặn TRƯỚC khi khớp route (401 của client auth)', async () => {
+  // `requireClientKey` chặn ngay trong middleware mount ở `/api/chat` mà không gọi
+  // `next()` — đây chính là ca lộ ra lỗi `req.path` bị Express viết đè thành `"/"` nếu
+  // không chụp lại đường dẫn TRƯỚC khi vào middleware con.
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_API_KEYS: 'key-mot', GATEWAY_ADMIN_TOKEN: 'admin' };
+  await withServer({ a: [] }, async (_call, _p, base) => {
+    await fetch(`${base}/api/chat`, json({ message: 'chào' }));
+
+    const res = await fetch(`${base}/metrics`, { headers: { Authorization: 'Bearer admin' } });
+    const text = await res.text();
+    assert.match(text, /ai_gateway_http_requests_total\{method="POST",route="\/api\/chat",status="401"\} 1/);
+    assert.doesNotMatch(text, /route="\/",status="401"/, 'route không được sụp về "/" khi request bị chặn trước lúc khớp route');
   }, { env });
 });
 
