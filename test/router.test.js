@@ -61,6 +61,16 @@ test('5xx thì sang ứng viên kế nhưng KHÔNG cooldown', async () => {
   assert.equal(acct(pool, 'a').isCoolingDown(), false);
 });
 
+test('mã lỗi không phân loại được (ví dụ 3xx) vẫn xoay sang ứng viên kế, không cooldown', async () => {
+  // Không phải lỗi mạng, không phải 4xx-phía-client (dưới 400), không phải 5xx, không có
+  // dấu hiệu hết quota trong thân — rơi vào nhánh "không phân loại được" của `_classify`.
+  const { router, pool } = makeRouter({ a: [{ status: 300 }], b: [{ ok: 'từ b' }] });
+  const result = await router.chat(MSG);
+
+  assert.equal(result.provider, 'b');
+  assert.equal(acct(pool, 'a').isCoolingDown(), false, 'mã không rõ nghĩa không đáng bị cho nghỉ dài');
+});
+
 test('4xx phía client thì trả lỗi ngay, không đốt các ứng viên còn lại', async () => {
   const { router, providers, pool } = makeRouter({
     a: [{ status: 400, body: '{"error":{"message":"messages sai định dạng"}}' }],

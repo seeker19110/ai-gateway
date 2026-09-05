@@ -1,9 +1,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
-const { Account, fingerprint, maskKey, parseKeyList, discoverKeys } = require('../lib/accounts');
+const {
+  Account,
+  fingerprint,
+  maskKey,
+  parseKeyList,
+  discoverKeys,
+  discoverClaudeCliCredential,
+  discoverGatewayClaudeCredential
+} = require('../lib/accounts');
+const claudeOAuth = require('../lib/claudeOAuth');
 const { AccountPool, interleaveByProvider } = require('../lib/pool');
 const { fakePool, acct } = require('./helpers');
+
+/** Thư mục CLI giả: `<dir>/.credentials.json`, để không đụng tới `~/.claude` thật khi test. */
+function fakeCliDir(content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-gateway-cli-'));
+  if (content !== undefined) {
+    fs.writeFileSync(path.join(dir, '.credentials.json'), typeof content === 'string' ? content : JSON.stringify(content));
+  }
+  return dir;
+}
 
 // ---------- tìm key ----------
 
@@ -174,9 +195,85 @@ test('mọi key của một nhà đều nghỉ thì nhà đó mới là rate_lim
   assert.equal(pool.statuses().a.status, 'rate_limited');
 });
 
+test('hết lượt RPM (không cooldown) thì nhà là `throttled`, khác hẳn `rate_limited`', () => {
+  const { pool } = fakePool({ a: [] });
+  const account = pool.accountsOf('a')[0];
+  account.maxRPM = 1;
+  account.trackRequest(); // đúng đầy cửa sổ RPM, chưa hề cooldown
+  assert.equal(pool.statuses().a.status, 'throttled');
+});
+
 test('nhà chưa có key nào là `inactive`, khác hẳn hết quota', () => {
   const providers = fakePool({ a: [] }).providers;
   const pool = new AccountPool(providers, { env: {} });
   assert.equal(pool.statuses().a.status, 'inactive');
   assert.equal(pool.hasAnyAccount(), false);
+});
+
+// ---------- tài khoản subscription Claude (CLI + gateway tự đăng nhập) ----------
+
+test('discoverClaudeCliCredential: không có file thì trả null, không ném lỗi', () => {
+  const env = { CLAUDE_CONFIG_DIR: fakeCliDir() };
+  assert.equal(discoverClaudeCliCredential(env), null);
+});
+
+test('discoverClaudeCliCredential: đọc đúng accessToken từ claudeAiOauth', () => {
+  const env = {
+    CLAUDE_CONFIG_DIR: fakeCliDir({ claudeAiOauth: { accessToken: 'sk-ant-oat-cli', expiresAt: Date.now() + 60_000 } })
+  };
+  const found = discoverClaudeCliCredential(env);
+  assert.deepEqual(found, { label: 'claude-cli', key: 'sk-ant-oat-cli' });
+});
+
+test('discoverClaudeCliCredential: token hết hạn thì bỏ qua, y như chưa đăng nhập', () => {
+  const env = {
+    CLAUDE_CONFIG_DIR: fakeCliDir({ claudeAiOauth: { accessToken: 'sk-ant-oat-cli', expiresAt: Date.now() - 1000 } })
+  };
+  assert.equal(discoverClaudeCliCredential(env), null);
+});
+
+test('discoverClaudeCliCredential: thiếu accessToken hoặc file hỏng JSON đều trả null', () => {
+  assert.equal(discoverClaudeCliCredential({ CLAUDE_CONFIG_DIR: fakeCliDir({ claudeAiOauth: {} }) }), null);
+  assert.equal(discoverClaudeCliCredential({ CLAUDE_CONFIG_DIR: fakeCliDir('{không phải json') }), null);
+});
+
+test('discoverClaudeCliCredential: cache TTL — sửa file trong vài giây đầu vẫn thấy giá trị cũ', () => {
+  const dir = fakeCliDir({ claudeAiOauth: { accessToken: 'v1', expiresAt: Date.now() + 60_000 } });
+  const env = { CLAUDE_CONFIG_DIR: dir };
+  assert.equal(discoverClaudeCliCredential(env).key, 'v1');
+
+  fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'v2', expiresAt: Date.now() + 60_000 } }));
+  // Vẫn trong cửa sổ cache (mặc định vài giây): đọc lại ngay chưa thấy giá trị mới — đây là
+  // đánh đổi có chủ đích để không `readFileSync` trên mọi request chat.
+  assert.equal(discoverClaudeCliCredential(env).key, 'v1');
+});
+
+test('discoverKeys("claude"): có CLI thì ưu tiên CLI, không đếm trùng với token gateway', () => {
+  const cliDir = fakeCliDir({ claudeAiOauth: { accessToken: 'cli-token', expiresAt: Date.now() + 60_000 } });
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-gateway-state-'));
+  claudeOAuth.saveCredential({ accessToken: 'gateway-token', expiresAt: Date.now() + 60_000 }, { GATEWAY_STATE_DIR: stateDir });
+
+  const env = { CLAUDE_CONFIG_DIR: cliDir, GATEWAY_STATE_DIR: stateDir };
+  const found = discoverKeys('claude', { env });
+  assert.deepEqual(found.map((f) => f.key), ['cli-token'], 'chỉ lấy CLI, không cộng thêm token gateway');
+});
+
+test('discoverGatewayClaudeCredential: không có CLI thì rơi về token gateway tự đăng nhập', () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-gateway-state-'));
+  const env = { CLAUDE_CONFIG_DIR: fakeCliDir(), GATEWAY_STATE_DIR: stateDir };
+
+  assert.equal(discoverGatewayClaudeCredential(env), null, 'chưa đăng nhập gateway thì chưa có gì');
+
+  claudeOAuth.saveCredential({ accessToken: 'gateway-token', expiresAt: Date.now() + 60_000 }, env);
+  assert.deepEqual(discoverGatewayClaudeCredential(env), { label: 'claude-subscription', key: 'gateway-token' });
+
+  const found = discoverKeys('claude', { env });
+  assert.deepEqual(found.map((f) => f.key), ['gateway-token']);
+});
+
+test('discoverGatewayClaudeCredential: token gateway hết hạn thì bỏ qua', () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-gateway-state-'));
+  const env = { GATEWAY_STATE_DIR: stateDir };
+  claudeOAuth.saveCredential({ accessToken: 'expired', expiresAt: Date.now() - 1000 }, env);
+  assert.equal(discoverGatewayClaudeCredential(env), null);
 });

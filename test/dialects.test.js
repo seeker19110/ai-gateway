@@ -27,6 +27,11 @@ test('tham số sai kiểu bị chặn ngay tại gateway', () => {
   assert.throws(() => normalizeParams({ stop: [1, 2] }), (err) => err.statusCode === 400);
 });
 
+test('`user` phải là chuỗi, kiểu khác bị chặn ngay tại gateway', () => {
+  assert.equal(normalizeParams({ user: 'khach-1' }).user, 'khach-1');
+  assert.throws(() => normalizeParams({ user: 123 }), (err) => err.statusCode === 400);
+});
+
 test('`stop` nhận cả chuỗi lẫn mảng, tối đa 4 như chuẩn OpenAI', () => {
   assert.deepEqual(normalizeParams({ stop: 'X' }).stop, ['X']);
   assert.deepEqual(normalizeParams({ stop: ['a', 'b', 'c', 'd', 'e'] }).stop, ['a', 'b', 'c', 'd']);
@@ -82,6 +87,21 @@ test('content dạng mảng khối text được dẹp phẳng', () => {
   assert.equal(flattenContent([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]), 'a\nb');
   assert.equal(flattenContent('thẳng'), 'thẳng');
   assert.equal(flattenContent(null), '');
+});
+
+test('content dạng mảng chứa chuỗi thô (không phải khối {type,text}) vẫn được dẹp phẳng', () => {
+  assert.equal(flattenContent(['a', 'b']), 'a\nb');
+});
+
+test('phần tử messages không phải object (null, chuỗi...) bị từ chối rõ ràng', () => {
+  assert.throws(
+    () => normalizeMessages([null]),
+    (err) => err.statusCode === 400 && /object/.test(err.message)
+  );
+  assert.throws(
+    () => normalizeMessages(['chỉ là chuỗi']),
+    (err) => err.statusCode === 400
+  );
 });
 
 test('khối không phải text bị từ chối chứ không bị bỏ qua', () => {
@@ -196,4 +216,10 @@ test('retryDelay của Google đọc được từ thân lỗi 429', () => {
   assert.equal(retryDelayFromGoogleError(body), 27);
   assert.equal(retryDelayFromGoogleError('{}'), null);
   assert.equal(retryDelayFromGoogleError('không phải json'), null);
+  assert.equal(retryDelayFromGoogleError(null), null);
+
+  // `details` có mặt nhưng không phần tử nào mang `retryDelay` hợp lệ: phải trả null chứ
+  // không ném lỗi hay đoán bừa một con số.
+  const noValidDelay = JSON.stringify({ error: { details: [{ '@type': 'khác', foo: 'bar' }] } });
+  assert.equal(retryDelayFromGoogleError(noValidDelay), null);
 });
