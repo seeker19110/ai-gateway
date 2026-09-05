@@ -215,7 +215,7 @@ giờ được chọn.
 | GET | `/api/providers/status` | Trạng thái pool, **có từng tài khoản**: cooldown còn lại, số request trong cửa sổ, lỗi cuối |
 | POST | `/api/providers/test` | Thử API key (nhận nhiều key một lượt, trả kết quả từng key) |
 | POST | `/api/providers/reset` | Xóa cooldown (`{"provider":"groq"}`, `{"account":"groq:a1b2…"}`, hoặc body rỗng để xóa tất cả) |
-| GET | `/health` | `{service, ready, total, accounts, accountsReady}` |
+| GET | `/health` | `{service, ready, total, accounts, accountsReady}` — **503** khi `ready` bằng 0 (không nhà nào phục vụ được), **200** nếu còn ít nhất một |
 
 `model` nhận ba dạng:
 
@@ -241,11 +241,39 @@ client.chat.completions.create(
 ```
 
 `api_key` phía client không được dùng tới — gateway tự xác thực với các nhà cung cấp bằng
-key trong `.env`. Vì vậy **đừng mở gateway ra internet**: ai gọi được cũng tiêu quota của bạn.
+key trong `.env`. Vì vậy **đừng mở `/api/chat` và `/v1/chat/completions` ra internet** mà
+không có lớp xác thực riêng ở trước (reverse proxy, VPN…): ai gọi được cũng tiêu quota của
+bạn — `GATEWAY_ADMIN_TOKEN` (xem "Bảo vệ endpoint quản trị") không khóa hai endpoint này.
 
 Tham số được chuyển tiếp: `temperature`, `top_p`, `top_k`, `max_tokens`, `stop`, `seed`,
 `presence_penalty`, `frequency_penalty`, `response_format`, `user` — mỗi cái được dịch sang
 phương ngữ của nhà cung cấp đang phục vụ, và bị lọc bỏ ở nhà nào không có nó.
+
+### Bảo vệ endpoint quản trị
+
+`/api/providers/status` (xem trạng thái từng tài khoản), `/api/providers/test` (thử API
+key), `/api/providers/reset` (xóa cooldown) và toàn bộ `/api/claude/oauth/*` (đăng nhập/đăng
+xuất subscription Claude) không có xác thực nào theo mặc định — giống `/api/chat`. Khác biệt
+là ba nhóm đầu không phải mặt hàng chính của gateway: ai gọi được cũng đọc được cấu hình
+pool, thử được key người khác, hoặc xóa cooldown đang bảo vệ một tài khoản.
+
+Đặt `GATEWAY_ADMIN_TOKEN` để khóa lại đúng các endpoint này:
+
+```bash
+GATEWAY_ADMIN_TOKEN=một-chuỗi-bí-mật-dài
+```
+
+Gọi kèm `Authorization: Bearer một-chuỗi-bí-mật-dài` (hoặc header `X-Admin-Token`, dễ gõ tay
+hơn khi test bằng curl):
+
+```bash
+curl -H "Authorization: Bearer một-chuỗi-bí-mật-dài" http://localhost:3000/api/providers/status
+```
+
+Không đặt biến này thì mọi thứ giữ nguyên như trước — không có gì bắt buộc phải cấu hình
+thêm để chạy `npm start` lần đầu. Web UI (mục Cài đặt API) tự hỏi token qua một hộp thoại
+ngay lần đầu gặp `401`, rồi nhớ lại trong `localStorage` cho những lần sau. `/api/chat` và
+`/v1/chat/completions` không nằm trong phạm vi biến này — xem cảnh báo ở mục "Dùng nhanh".
 
 ### Ảnh
 
