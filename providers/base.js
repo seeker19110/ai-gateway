@@ -41,6 +41,11 @@ class BaseProvider {
     // ghim một request có function calling vào một nhà chưa nói được nó sẽ ra một câu trả
     // lời bỏ qua tool im lặng — hỏng tệ hơn cả việc thu hẹp pool.
     this.supportsTools = options.supportsTools !== undefined ? options.supportsTools : this.dialect === 'openai';
+    // Nhà cung cấp có nói được khối `image_url` trong content không? Phương ngữ `openai`
+    // chuyển thẳng mảng khối xuống upstream (đúng khuôn OpenAI, không cần dịch); Anthropic
+    // và Gemini tự khai `true` vì có bản dịch riêng sang khối ảnh của họ. Cohere v2 (bản
+    // gateway đang nói) không có chỗ cho ảnh trong `content`, nên vẫn `false`.
+    this.supportsImages = options.supportsImages !== undefined ? options.supportsImages : this.dialect === 'openai';
   }
 
   /** Dịch tham số chuẩn OpenAI sang phương ngữ của hãng này. */
