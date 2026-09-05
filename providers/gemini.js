@@ -3,7 +3,7 @@ const { UpstreamError } = require('../lib/errors');
 const { parseSSEJson } = require('../lib/sse');
 const { readRateLimit, retryDelayFromGoogleError } = require('../lib/ratelimit');
 const { toGemini } = require('../lib/params');
-const { toAlternating } = require('../lib/messages');
+const { toAlternating, toBlockTurns, hasImages } = require('../lib/messages');
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -24,6 +24,7 @@ class GeminiProvider extends BaseProvider {
         'frequency_penalty',
         'response_format'
       ],
+      supportsImages: true,
       ...options
     });
   }
@@ -99,6 +100,8 @@ class GeminiProvider extends BaseProvider {
   }
 
   buildBody(messages, params) {
+    if (hasImages(messages)) return this.buildBodyWithImages(messages, params);
+
     const { system, turns } = toAlternating(messages);
 
     const body = {
@@ -111,6 +114,42 @@ class GeminiProvider extends BaseProvider {
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     return body;
   }
+
+  /** Như `buildBody`, nhưng `content` là mảng khối (text + `image_url`) thay vì chuỗi. */
+  buildBodyWithImages(messages, params) {
+    const { system, turns } = toBlockTurns(messages);
+
+    const body = {
+      contents: turns.map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: m.content.map(geminiPart)
+      })),
+      ...this.translateParams(params)
+    };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+    return body;
+  }
+}
+
+/**
+ * Khối `{type:'text'|'image_url'}` chuẩn OpenAI → `part` của Gemini.
+ *
+ * Gemini chỉ nhận ảnh dạng `inlineData` (base64 nhúng thẳng vào request) qua đường
+ * `generateContent` này — ảnh ở một URL công khai cần đi qua Files API riêng của họ (upload
+ * trước, tham chiếu bằng URI sau), một luồng khác hẳn và gateway này chưa nói được. Nên URL
+ * thường bị từ chối rõ ràng bằng 400 thay vì âm thầm bỏ ảnh hoặc gửi một field họ không hiểu.
+ */
+function geminiPart(block) {
+  if (block.type === 'text') return { text: block.text || '' };
+
+  const match = /^data:([^;]+);base64,(.+)$/s.exec(block.image_url?.url || '');
+  if (!match) {
+    throw new UpstreamError(
+      'Gemini chỉ nhận ảnh dạng base64 data URI ("data:image/…;base64,…"), không nhận URL công khai',
+      400
+    );
+  }
+  return { inlineData: { mimeType: match[1], data: match[2] } };
 }
 
 function readText(payload) {

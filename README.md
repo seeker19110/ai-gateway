@@ -247,6 +247,42 @@ Tham số được chuyển tiếp: `temperature`, `top_p`, `top_k`, `max_tokens
 `presence_penalty`, `frequency_penalty`, `response_format`, `user` — mỗi cái được dịch sang
 phương ngữ của nhà cung cấp đang phục vụ, và bị lọc bỏ ở nhà nào không có nó.
 
+### Ảnh
+
+`content` của một message nhận thêm khối `image_url` (đúng khuôn OpenAI), trộn chung với
+khối `text`:
+
+```python
+client.chat.completions.create(
+    model="auto",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Ảnh này vẽ gì?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KG..."}}
+        ]
+    }],
+)
+```
+
+Nhận cả hai dạng `url`: **base64 nhúng thẳng** (`data:image/png;base64,...`) và **URL công
+khai** (`https://...`) — nhưng không phải nhà nào cũng nhận cả hai:
+
+| Nhà cung cấp | base64 | URL công khai |
+|---|---|---|
+| 7 nhà chuẩn OpenAI (OpenAI, Groq, OpenRouter, Mistral, Cerebras, DeepSeek, Together) | có | có (chuyển thẳng, không dịch) |
+| Anthropic Claude | có | có (khối `image`, `source.type` khác nhau) |
+| Google Gemini | có (`inlineData`) | **không** — trả 400 rõ ràng, không âm thầm bỏ ảnh |
+| Cohere | **không** | **không** |
+
+`model: "auto"` tự loại Cohere khỏi ứng viên khi request có ảnh (giống cách lọc `tools`).
+Ghim thẳng Gemini (`model: "gemini"`) kèm ảnh dạng URL sẽ bị từ chối bằng 400 vì Gemini chỉ
+đọc được ảnh nhúng base64 qua đường `generateContent` — muốn dùng URL công khai với Gemini
+thì phải tự tải ảnh về và mã hóa base64 trước khi gửi.
+
+Video và audio **chưa được hỗ trợ** ở bất kỳ nhà nào — một khối `video_url`/`input_audio`
+bị từ chối rõ ràng bằng 400 ngay tại gateway thay vì bị lặng lẽ bỏ đi.
+
 ### Function calling
 
 `tools` (khai báo hàm chuẩn OpenAI) và `tool_choice` được nhận ở cả `/v1/chat/completions`
@@ -342,8 +378,9 @@ theo tên nhà cung cấp) vẫn đọc được, hiểu là "cả nhà cung c�
   hạn mức cho cả tổ chức, nên hai key cùng dự án sẽ hết quota cùng lúc và việc thêm key thứ
   hai không mua thêm được gì. Xen kẽ theo nhà cung cấp làm điều này chỉ tốn một lần thử thừa
   mỗi vòng, nhưng không sửa được gốc: muốn nhân hạn mức thì key phải thuộc dự án/tổ chức khác.
-- **Chỉ chuyển văn bản.** Ảnh, audio chưa đi qua được gateway — và bị từ chối rõ ràng bằng
-  400 thay vì bị lặng lẽ bỏ đi.
+- **Ảnh đi qua được ở 9/10 nhà cung cấp** (`content` dạng khối `image_url`, xem "Ảnh" bên
+  dưới) — chỉ Cohere chưa hỗ trợ. **Video và audio thì chưa nhà nào** — bị từ chối rõ ràng
+  bằng 400 thay vì bị lặng lẽ bỏ đi.
 - **Tool/function calling** đi qua được ở 8/10 nhà cung cấp: bảy nhà chuẩn OpenAI (OpenAI,
   Groq, OpenRouter, Mistral, Cerebras, DeepSeek, Together — passthrough nguyên `tools`/
   `tool_choice`) và Anthropic Claude (dịch sang `input_schema`/`tool_use`/`tool_result`).

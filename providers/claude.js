@@ -3,7 +3,7 @@ const { UpstreamError } = require('../lib/errors');
 const { parseSSEJson } = require('../lib/sse');
 const { readRateLimit } = require('../lib/ratelimit');
 const { toAnthropic } = require('../lib/params');
-const { toAlternating, splitSystem, dropLeadingAssistant } = require('../lib/messages');
+const { toAlternating, splitSystem, dropLeadingAssistant, hasImages, mergeBlockConsecutive } = require('../lib/messages');
 
 const URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MAX_TOKENS = 4096;
@@ -20,6 +20,7 @@ class ClaudeProvider extends BaseProvider {
       // `temperature` của Anthropic chỉ tới 1, trong khi chuẩn OpenAI cho tới 2.
       paramRanges: { temperature: [0, 1], top_p: [0, 1], top_k: [1, 500] },
       supportsTools: true,
+      supportsImages: true,
       ...options
     });
     this.defaultMaxTokens = options.defaultMaxTokens || DEFAULT_MAX_TOKENS;
@@ -131,7 +132,7 @@ class ClaudeProvider extends BaseProvider {
 
   buildBody(messages, params, model, apiKey) {
     const hasTools = Array.isArray(params.tools) && params.tools.length > 0;
-    const { system, turns } = hasTools ? toAnthropicTurns(messages) : toAlternating(messages);
+    const { system, turns } = hasTools || hasImages(messages) ? toAnthropicTurns(messages) : toAlternating(messages);
     const body = {
       model: model || this.model,
       // `max_tokens` là trường BẮT BUỘC của API này — thiếu nó là 400 chứ không phải một
@@ -195,7 +196,7 @@ function anthropicHeaders(apiKey) {
 function toAnthropicTurns(messages) {
   const { system, chat } = splitSystem(messages);
   const blocks = dropLeadingAssistant(chat.map(messageToAnthropicBlocks));
-  const turns = mergeAnthropicConsecutive(blocks);
+  const turns = mergeBlockConsecutive(blocks);
   if (!turns.length) {
     throw new UpstreamError('Hội thoại phải có ít nhất một lượt của user', 400);
   }
@@ -222,21 +223,23 @@ function messageToAnthropicBlocks(m) {
     }
     return { role: 'assistant', content };
   }
-  return { role: m.role, content: [{ type: 'text', text: m.content || '' }] };
+  const content = Array.isArray(m.content)
+    ? m.content.map(anthropicBlockFromOpenAI)
+    : [{ type: 'text', text: m.content || '' }];
+  return { role: m.role, content };
 }
 
-/** Như `mergeConsecutive` nhưng nối MẢNG khối thay vì nối chuỗi. */
-function mergeAnthropicConsecutive(chat) {
-  const out = [];
-  for (const m of chat) {
-    const last = out[out.length - 1];
-    if (last && last.role === m.role) {
-      last.content = last.content.concat(m.content);
-    } else {
-      out.push({ role: m.role, content: m.content.slice() });
-    }
+/** Khối `{type:'text'|'image_url'}` chuẩn OpenAI → khối nội dung Anthropic. */
+function anthropicBlockFromOpenAI(block) {
+  if (block.type === 'text') return { type: 'text', text: block.text || '' };
+
+  // `data:` là ảnh nhúng thẳng (base64); còn lại coi là URL công khai — Anthropic hỗ trợ
+  // CẢ HAI dạng nguồn ảnh (khác Gemini, chỉ nhận base64), nên không cần từ chối URL ở đây.
+  const dataMatch = /^data:([^;]+);base64,(.+)$/s.exec(block.image_url?.url || '');
+  if (dataMatch) {
+    return { type: 'image', source: { type: 'base64', media_type: dataMatch[1], data: dataMatch[2] } };
   }
-  return out;
+  return { type: 'image', source: { type: 'url', url: block.image_url?.url } };
 }
 
 /** Khai báo hàm chuẩn OpenAI → phương ngữ Anthropic (`input_schema` thay vì `parameters`). */
