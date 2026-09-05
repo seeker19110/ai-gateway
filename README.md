@@ -16,6 +16,29 @@ khoản sinh ra để tránh.
 Cooldown, cửa sổ RPM, dấu LRU, số lượt thành công/thất bại đều nằm ở tài khoản. Nhà cung
 cấp chỉ còn là bộ chuyển ngữ: biết nói chuyện với upstream nào, theo phương ngữ nào.
 
+### Tài khoản subscription (Claude Pro/Max)
+
+`CLAUDE_API_KEY(S)` nhận cả API key Console (`sk-ant-api...`) lẫn token OAuth của tài khoản
+subscription (`sk-ant-oat...`, lấy từ đăng nhập Claude Code/claude.ai). Gateway tự nhận diện
+theo tiền tố: token subscription được gửi bằng `Authorization: Bearer` kèm header
+`anthropic-beta: oauth-2025-04-20` và system prompt tự xưng "Claude Code" — đúng thứ
+Anthropic đòi hỏi ở loại token này — thay vì `x-api-key` như API key thường. Không cần khai
+báo gì thêm, cứ dán token vào chung danh sách key là dùng được.
+
+Tiện hơn nữa: nếu máy chạy gateway đã `claude login` (Claude Code CLI) bằng tài khoản
+subscription, gateway tự đọc token từ `~/.claude/.credentials.json` (hay
+`$CLAUDE_CONFIG_DIR/.credentials.json`) và thêm nó vào pool dưới nhãn `claude-cli` — không
+cần copy tay, không cần biến môi trường nào. Token hết hạn thì gateway lặng lẽ bỏ qua, y như
+chưa đăng nhập.
+
+### Dạng proxy MCP
+
+Gateway lộ thêm một endpoint MCP (Model Context Protocol) tại `/mcp` — JSON-RPC 2.0 chuẩn
+(`initialize`, `tools/list`, `tools/call`), không cần SDK riêng. Client MCP (Claude Desktop,
+Claude Code…) trỏ tới `<base_url>/mcp` là gọi được tool `chat`, đi xuyên qua đúng
+`router.chat()` mà `/api/chat` dùng: failover, xoay vòng tài khoản, cooldown và tài khoản
+subscription CLI ở trên đều áp dụng y hệt.
+
 ### Khai báo nhiều key
 
 Ba cách, dùng cách nào cũng được và trộn lẫn cũng được:

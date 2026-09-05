@@ -335,3 +335,49 @@ test('stream khi pool kiệt thì trả 429, không mở SSE', async () => {
     assert.equal(res.status, 429);
   });
 });
+
+test('POST /mcp: initialize rồi tools/list trả đúng tool "chat"', async () => {
+  await withServer({ a: [{ ok: 'xin chào' }] }, async (call) => {
+    const init = await call('/mcp', json({ jsonrpc: '2.0', id: 1, method: 'initialize' }));
+    assert.equal(init.status, 200);
+    assert.equal(init.body.result.protocolVersion, '2024-11-05');
+
+    const list = await call('/mcp', json({ jsonrpc: '2.0', id: 2, method: 'tools/list' }));
+    assert.equal(list.body.result.tools[0].name, 'chat');
+  });
+});
+
+test('POST /mcp: tools/call "chat" đi qua đúng router, xoay vòng như /api/chat', async () => {
+  await withServer({ a: [{ ok: 'xin chào' }], b: [] }, async (call) => {
+    const { status, body } = await call('/mcp', json({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'chat', arguments: { message: 'chào' } }
+    }));
+    assert.equal(status, 200);
+    assert.equal(body.result.content[0].text, 'xin chào');
+    assert.equal(body.result.isError, undefined);
+  });
+});
+
+test('POST /mcp: tool lạ hoặc pool kiệt trả isError, không vỡ JSON-RPC', async () => {
+  await withServer({ a: [] }, async (call, { pool }) => {
+    acct(pool, 'a').markUnavailable(429);
+    const { body } = await call('/mcp', json({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'chat', arguments: { message: 'chào' } }
+    }));
+    assert.equal(body.result.isError, true);
+
+    const unknown = await call('/mcp', json({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: { name: 'khong-ton-tai', arguments: {} }
+    }));
+    assert.equal(unknown.body.result.isError, true);
+  });
+});

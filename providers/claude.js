@@ -38,7 +38,7 @@ class ClaudeProvider extends BaseProvider {
     const { data, rateLimit } = await this.request(URL, {
       method: 'POST',
       headers: anthropicHeaders(apiKey),
-      body: JSON.stringify(this.buildBody(messages, params, model))
+      body: JSON.stringify(this.buildBody(messages, params, model, apiKey))
     });
 
     const text = (data?.content || [])
@@ -59,7 +59,7 @@ class ClaudeProvider extends BaseProvider {
     const response = await this.requestRaw(URL, {
       method: 'POST',
       headers: { ...anthropicHeaders(apiKey), Accept: 'text/event-stream' },
-      body: JSON.stringify({ ...this.buildBody(messages, params, model), stream: true })
+      body: JSON.stringify({ ...this.buildBody(messages, params, model, apiKey), stream: true })
     });
 
     yield { rateLimit: readRateLimit(response.headers) };
@@ -101,7 +101,7 @@ class ClaudeProvider extends BaseProvider {
     }
   }
 
-  buildBody(messages, params, model) {
+  buildBody(messages, params, model, apiKey) {
     const { system, turns } = toAlternating(messages);
     const body = {
       model: model || this.model,
@@ -110,12 +110,39 @@ class ClaudeProvider extends BaseProvider {
       ...this.translateParams(params),
       messages: turns
     };
-    if (system) body.system = system;
+    // Token subscription (Claude Pro/Max) không đi qua Console nên không mang `system` của
+    // riêng nhà phát triển — Anthropic đòi request phải tự xưng là Claude Code, nếu không
+    // trả 401. API key thường (`sk-ant-api...`) không có ràng buộc này.
+    if (isSubscriptionToken(apiKey)) {
+      body.system = [{ type: 'text', text: CLAUDE_CODE_SYSTEM_PROMPT }, ...(system ? [{ type: 'text', text: system }] : [])];
+    } else if (system) {
+      body.system = system;
+    }
     return body;
   }
 }
 
+/**
+ * Token subscription (đăng nhập Claude Pro/Max qua OAuth) khác hẳn API key Console:
+ * `sk-ant-oat...` thay vì `sk-ant-api...`. Loại token này không dùng `x-api-key` mà dùng
+ * `Authorization: Bearer` kèm header beta `oauth-2025-04-20` — đúng thứ Claude Code (CLI)
+ * gửi khi người dùng đăng nhập bằng tài khoản subscription thay vì dán API key.
+ */
+function isSubscriptionToken(apiKey) {
+  return /^sk-ant-oat/i.test(String(apiKey || ''));
+}
+
+const CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 function anthropicHeaders(apiKey) {
+  if (isSubscriptionToken(apiKey)) {
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'oauth-2025-04-20'
+    };
+  }
   return {
     'Content-Type': 'application/json',
     'x-api-key': apiKey,
@@ -130,3 +157,4 @@ function anthropicUsage(usage = {}) {
 }
 
 module.exports = ClaudeProvider;
+module.exports.isSubscriptionToken = isSubscriptionToken;

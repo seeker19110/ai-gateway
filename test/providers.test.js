@@ -177,6 +177,31 @@ test('Claude tách system message và đọc usage', async () => {
   );
 });
 
+test('Claude nhận token subscription (sk-ant-oat) và gửi Bearer thay vì x-api-key', async () => {
+  const { claude } = createProviders({});
+  await withFetch(
+    async () =>
+      jsonResponse(200, {
+        content: [{ type: 'text', text: 'chào' }],
+        usage: { input_tokens: 7, output_tokens: 3 }
+      }),
+    async (stub) => {
+      const result = await claude.chat(MSG, 'sk-ant-oat01-abc123');
+      assert.equal(result.text, 'chào');
+
+      const headers = stub.calls[0].init.headers;
+      assert.equal(headers.Authorization, 'Bearer sk-ant-oat01-abc123');
+      assert.equal(headers['x-api-key'], undefined);
+      assert.equal(headers['anthropic-beta'], 'oauth-2025-04-20');
+
+      const body = JSON.parse(stub.calls[0].init.body);
+      assert.ok(Array.isArray(body.system), 'system phải là mảng khi dùng token subscription');
+      assert.match(body.system[0].text, /Claude Code/);
+      assert.equal(body.system[1].text, 'Bạn là trợ lý.');
+    }
+  );
+});
+
 test('Claude bỏ qua block không phải text', async () => {
   const { claude } = createProviders({});
   await withFetch(
