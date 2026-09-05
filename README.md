@@ -33,11 +33,20 @@ chưa đăng nhập.
 
 ### Dạng proxy MCP
 
-Gateway lộ thêm một endpoint MCP (Model Context Protocol) tại `/mcp` — JSON-RPC 2.0 chuẩn
-(`initialize`, `tools/list`, `tools/call`), không cần SDK riêng. Client MCP (Claude Desktop,
-Claude Code…) trỏ tới `<base_url>/mcp` là gọi được tool `chat`, đi xuyên qua đúng
-`router.chat()` mà `/api/chat` dùng: failover, xoay vòng tài khoản, cooldown và tài khoản
-subscription CLI ở trên đều áp dụng y hệt.
+Gateway lộ thêm một endpoint MCP (Model Context Protocol) tại `/mcp`, nói đúng transport
+"Streamable HTTP" của spec — không chỉ JSON-RPC trần:
+
+- `initialize` cấp một phiên qua header `Mcp-Session-Id`; mọi request sau đó phải mang lại
+  đúng header này (thiếu → 400, sai/hết hạn → 404 để client tự `initialize` lại).
+- Phản hồi theo `Accept` của client: `application/json` thì trả JSON thường, còn nếu client
+  chỉ nhận `text/event-stream` thì gateway trả một sự kiện SSE rồi đóng — không giữ kết nối
+  sống vì không có gì để đẩy thêm.
+- `GET /mcp` trả 405 (không có server-initiated message nào để mở kênh), `DELETE /mcp` đóng
+  phiên chủ động.
+
+Client MCP (Claude Desktop, Claude Code…) trỏ tới `<base_url>/mcp` là gọi được tool `chat`,
+đi xuyên qua đúng `router.chat()` mà `/api/chat` dùng: failover, xoay vòng tài khoản, cooldown
+và tài khoản subscription CLI ở trên đều áp dụng y hệt.
 
 ### Khai báo nhiều key
 
