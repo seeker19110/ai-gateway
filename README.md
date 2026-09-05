@@ -6,6 +6,8 @@ tài khoản khác khi cái đang dùng hết quota, hỏng, hoặc không trả
 
 Nhà cung cấp: Gemini, Groq, OpenAI, Claude, OpenRouter, Mistral, Cerebras, Cohere, DeepSeek, Together.
 
+License: [MIT](LICENSE).
+
 ## Đơn vị xoay vòng là tài khoản, không phải nhà cung cấp
 
 Hạn mức được cấp cho từng **API key**, không cho cả hãng. Nên sức khỏe cũng phải đo trên
@@ -205,6 +207,30 @@ npm test                 # không gọi mạng: fetch được stub
 Không cần điền đủ. Nhà cung cấp nào không có key thì ở trạng thái `inactive` và không bao
 giờ được chọn.
 
+### Chạy bằng Docker
+
+```bash
+docker build -t ai-gateway .
+docker run -p 3000:3000 --env-file .env ai-gateway
+```
+
+Image chạy bằng user `node` (không phải root), chỉ mang theo `node_modules` sản xuất
+(`npm ci --omit=dev`) — không có devDependencies, không có mã nguồn test. Cooldown ghi ở
+`~/.ai-gateway` bên trong container: mount một volume vào đó nếu muốn cooldown sống qua việc
+container bị thay mới (`docker run -v ai-gateway-state:/home/node/.ai-gateway ...`), không thì
+container mới coi như chưa từng nghỉ tài khoản nào.
+
+## Quan sát
+
+`GET /metrics` phơi số request và tổng thời gian xử lý theo `method`, `route`, `status`, khuôn
+Prometheus text — đủ để dựng một dashboard cơ bản (bao nhiêu lỗi 429/500, endpoint nào chậm)
+mà không phải đọc log tay. Endpoint này nằm sau `GATEWAY_ADMIN_TOKEN` (xem "Bảo vệ endpoint
+quản trị") nếu biến đó được đặt.
+
+Mỗi request cũng ra một dòng log dạng `METHOD path status thời_gian_ms`, bất kể request có đi
+tới route nào hay chết yểu từ sớm (401, JSON hỏng, 404) — chỗ duy nhất trả lời được "gateway
+có đang được gọi không" mà không phải tin vào cảm giác của người vận hành.
+
 ## Endpoint
 
 | Method | Path | |
@@ -216,6 +242,7 @@ giờ được chọn.
 | POST | `/api/providers/test` | Thử API key (nhận nhiều key một lượt, trả kết quả từng key) |
 | POST | `/api/providers/reset` | Xóa cooldown (`{"provider":"groq"}`, `{"account":"groq:a1b2…"}`, hoặc body rỗng để xóa tất cả) |
 | GET | `/health` | `{service, ready, total, accounts, accountsReady}` — **503** khi `ready` bằng 0 (không nhà nào phục vụ được), **200** nếu còn ít nhất một |
+| GET | `/metrics` | Số request + tổng thời gian xử lý theo method/route/status, khuôn Prometheus text — xem "Quan sát" |
 
 `model` nhận ba dạng:
 
@@ -241,21 +268,45 @@ client.chat.completions.create(
 ```
 
 `api_key` phía client không được dùng tới — gateway tự xác thực với các nhà cung cấp bằng
-key trong `.env`. Vì vậy **đừng mở `/api/chat` và `/v1/chat/completions` ra internet** mà
-không có lớp xác thực riêng ở trước (reverse proxy, VPN…): ai gọi được cũng tiêu quota của
-bạn — `GATEWAY_ADMIN_TOKEN` (xem "Bảo vệ endpoint quản trị") không khóa hai endpoint này.
+key trong `.env`. Đặt `GATEWAY_API_KEY` (xem "Bảo vệ endpoint chính") để bắt buộc client phải
+mang đúng key của GATEWAY (khác với key của các nhà cung cấp) trước khi gọi được `/api/chat`,
+`/v1/chat/completions` hay `/mcp`; không đặt thì ai gọi được cổng cũng tiêu quota của bạn.
 
 Tham số được chuyển tiếp: `temperature`, `top_p`, `top_k`, `max_tokens`, `stop`, `seed`,
 `presence_penalty`, `frequency_penalty`, `response_format`, `user` — mỗi cái được dịch sang
 phương ngữ của nhà cung cấp đang phục vụ, và bị lọc bỏ ở nhà nào không có nó.
 
+### Bảo vệ endpoint chính
+
+`/api/chat`, `/v1/chat/completions` và `/mcp` không có xác thực nào theo mặc định — ai gọi
+được cổng cũng tiêu quota của các nhà cung cấp phía sau, y hệt như đang cầm key thật của bạn.
+
+Đặt `GATEWAY_API_KEY` (một key) hoặc `GATEWAY_API_KEYS` (danh sách, cùng cú pháp với key nhà
+cung cấp — phẩy/chấm phẩy/xuống dòng, đặt tên được bằng `nhãn=key`) để khóa lại:
+
+```bash
+GATEWAY_API_KEYS=client-a=một-chuỗi-bí-mật,client-b=chuỗi-khác
+```
+
+Gọi kèm `Authorization: Bearer một-chuỗi-bí-mật` (hoặc header `X-Api-Key`):
+
+```bash
+curl -H "Authorization: Bearer một-chuỗi-bí-mật" http://localhost:3000/v1/chat/completions ...
+```
+
+Nhiều key hợp lệ cùng lúc nghĩa là mỗi client (mỗi ứng dụng, mỗi người dùng gateway) mang một
+key riêng — thu hồi được key của một client mà không ảnh hưởng những client còn lại. Không
+đặt biến nào thì mọi thứ giữ nguyên như trước, không cần cấu hình gì thêm để chạy `npm start`
+lần đầu — nhưng gateway sẽ ghi một dòng cảnh báo lúc khởi động để nhắc việc này.
+
 ### Bảo vệ endpoint quản trị
 
 `/api/providers/status` (xem trạng thái từng tài khoản), `/api/providers/test` (thử API
-key), `/api/providers/reset` (xóa cooldown) và toàn bộ `/api/claude/oauth/*` (đăng nhập/đăng
-xuất subscription Claude) không có xác thực nào theo mặc định — giống `/api/chat`. Khác biệt
-là ba nhóm đầu không phải mặt hàng chính của gateway: ai gọi được cũng đọc được cấu hình
-pool, thử được key người khác, hoặc xóa cooldown đang bảo vệ một tài khoản.
+key), `/api/providers/reset` (xóa cooldown), toàn bộ `/api/claude/oauth/*` (đăng nhập/đăng
+xuất subscription Claude), và `/metrics` (xem "Quan sát") dùng một cơ chế **riêng** với
+`/api/chat` ở trên — không phải mặt hàng chính của gateway nên không nên chia sẻ chung một
+key với client gọi chat: ai gọi được cũng đọc được cấu hình pool, thử được key người khác,
+xóa cooldown đang bảo vệ một tài khoản, hoặc thấy được nhịp gọi thật của gateway.
 
 Đặt `GATEWAY_ADMIN_TOKEN` để khóa lại đúng các endpoint này:
 
@@ -272,8 +323,7 @@ curl -H "Authorization: Bearer một-chuỗi-bí-mật-dài" http://localhost:30
 
 Không đặt biến này thì mọi thứ giữ nguyên như trước — không có gì bắt buộc phải cấu hình
 thêm để chạy `npm start` lần đầu. Web UI (mục Cài đặt API) tự hỏi token qua một hộp thoại
-ngay lần đầu gặp `401`, rồi nhớ lại trong `localStorage` cho những lần sau. `/api/chat` và
-`/v1/chat/completions` không nằm trong phạm vi biến này — xem cảnh báo ở mục "Dùng nhanh".
+ngay lần đầu gặp `401`, rồi nhớ lại trong `localStorage` cho những lần sau.
 
 ### Ảnh
 
@@ -374,9 +424,10 @@ lib/errors.js      UpstreamError mang mã HTTP thật + cắt gọn thông đi�
 lib/sse.js         đọc Server-Sent Events, dùng chung cho cả 4 định dạng stream
 lib/store.js       lưu cooldown xuống đĩa để sống qua restart
 lib/providers.js   dựng 10 nhà cung cấp, đọc model/RPM ghi đè từ .env
+lib/metrics.js     bộ đếm request trong bộ nhớ, phơi ra khuôn Prometheus text
 lib/app.js         express app (test dựng app riêng, không đụng cổng thật)
 providers/base.js  gọi HTTP, chuẩn hóa lỗi, khai báo phương ngữ + tham số nhận được
-server.js          chỉ mở cổng
+server.js          mở cổng, log/thoát an toàn khi có lỗi không bắt được, đóng êm khi có SIGTERM/SIGINT
 ```
 
 Provider làm ba việc: gọi upstream, ném `UpstreamError` mang mã HTTP thật, và khai báo nó nói

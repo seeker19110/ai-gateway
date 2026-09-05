@@ -1,8 +1,9 @@
 {
   "name": "ai-gateway",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI API Gateway - xoay vòng 10 nhà cung cấp AI với failover phân loại theo mã lỗi; nói chuẩn OpenAI Chat Completions (có stream)",
   "main": "server.js",
+  "license": "MIT",
   "engines": {
     "node": ">=18"
   },
