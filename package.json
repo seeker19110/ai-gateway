@@ -1,6 +1,6 @@
 {
   "name": "ai-gateway",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "AI API Gateway - xoay vòng 10 nhà cung cấp AI với failover phân loại theo mã lỗi; nói chuẩn OpenAI Chat Completions (có stream)",
   "main": "server.js",
   "license": "MIT",
@@ -10,11 +10,15 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "lint": "eslint ."
   },
   "dependencies": {
-    "express": "^5.2.1",
     "cors": "^2.8.6",
-    "dotenv": "^17.4.2"
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "eslint": "^10.10.0"
   }
 }

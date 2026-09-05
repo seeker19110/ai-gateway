@@ -55,3 +55,18 @@ jobs:
       # body-parser). Chặn ở CI thay vì đợi ai đó chạy `npm audit` tại chỗ và tình cờ thấy —
       # dependency mới có CVE không tự báo, phải có ai hỏi.
       - run: npm audit --audit-level=moderate
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint

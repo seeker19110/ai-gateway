@@ -340,7 +340,6 @@ test('stream_options chỉ gửi cho nhà cung cấp thật sự có tham số �
 
   for (const [name, expected] of [['groq', true], ['cerebras', false], ['mistral', false]]) {
     await withFetch(sse, async (stub) => {
-      // eslint-disable-next-line no-unused-vars
       for await (const _ of providers[name].stream(MSG, 'key')) { /* chỉ cần mở kết nối */ }
       const body = JSON.parse(stub.calls[0].init.body);
       assert.equal(
