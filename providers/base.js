@@ -35,6 +35,12 @@ class BaseProvider {
     // `stream_options: {include_usage:true}` — chỉ hãng nào hiểu mới được nhận, hãng khác
     // hoặc bỏ qua (mất gì đâu) hoặc trả 400 (mất cả request).
     this.streamUsage = options.streamUsage !== false;
+    // Nhà cung cấp có nói được `tools`/`tool_choice` (function calling) không? Mặc định
+    // theo phương ngữ `openai` là có (đúng chuẩn), phương ngữ khác phải tự khai báo vì mỗi
+    // nhà một cách biểu diễn khác nhau. Router lọc pool theo cờ này khi request có `tools`:
+    // ghim một request có function calling vào một nhà chưa nói được nó sẽ ra một câu trả
+    // lời bỏ qua tool im lặng — hỏng tệ hơn cả việc thu hẹp pool.
+    this.supportsTools = options.supportsTools !== undefined ? options.supportsTools : this.dialect === 'openai';
   }
 
   /** Dịch tham số chuẩn OpenAI sang phương ngữ của hãng này. */
@@ -139,15 +145,27 @@ class BaseProvider {
         model: model || this.model,
         messages,
         ...this.translateParams(params),
+        ...this.translateTools(params),
         ...body
       })
     });
 
-    const text = data?.choices?.[0]?.message?.content;
-    if (typeof text !== 'string' || !text) {
+    const message = data?.choices?.[0]?.message;
+    const text = message?.content;
+    const toolCalls = normalizeToolCalls(message?.tool_calls);
+    if ((typeof text !== 'string' || !text) && !toolCalls) {
       throw new UpstreamError(`${this.displayName} trả về phản hồi rỗng hoặc sai định dạng`, 502);
     }
-    return { text, usage: normalizeUsage(data.usage), rateLimit };
+    return { text: typeof text === 'string' ? text : '', toolCalls, usage: normalizeUsage(data.usage), rateLimit };
+  }
+
+  /** `tools`/`tool_choice` chỉ được gửi tới nhà cung cấp khai báo `supportsTools`. */
+  translateTools(params = {}) {
+    if (!this.supportsTools || !params.tools) return {};
+    return {
+      tools: params.tools,
+      ...(params.tool_choice !== undefined ? { tool_choice: params.tool_choice } : {})
+    };
   }
 
   // ---------- stream ----------
@@ -183,19 +201,57 @@ class BaseProvider {
         // gửi kèm là hỏng đúng những request đang muốn đếm token.
         ...(this.streamUsage ? { stream_options: { include_usage: true } } : {}),
         ...this.translateParams(params),
+        ...this.translateTools(params),
         ...body
       })
     });
 
     yield { rateLimit: readRateLimit(response.headers) };
 
+    // Lời gọi hàm tới theo mẩu: mỗi mẩu chỉ mang một PHẦN của tên hàm hoặc tham số JSON,
+    // ghép theo `index` cho tới mẩu cuối cùng. Không có ranh giới rõ ràng như `usage`, nên
+    // phải gom tới hết stream rồi mới phát ra một lần.
+    const toolCalls = new Map();
     for await (const { payload } of parseSSEJson(response)) {
-      const delta = payload?.choices?.[0]?.delta?.content;
-      if (delta) yield { text: delta };
+      const delta = payload?.choices?.[0]?.delta;
+      if (delta?.content) yield { text: delta.content };
+      if (delta?.tool_calls) accumulateToolCallDeltas(toolCalls, delta.tool_calls);
       // Mẩu cuối của OpenAI mang `usage` và `choices` rỗng.
       if (payload?.usage) yield { usage: normalizeUsage(payload.usage) };
     }
+
+    if (toolCalls.size) {
+      yield {
+        toolCalls: [...toolCalls.keys()]
+          .sort((a, b) => a - b)
+          .map((i) => toolCalls.get(i))
+      };
+    }
   }
+}
+
+/** Gom các mẩu `delta.tool_calls` (OpenAI) theo `index` thành lời gọi hàm đầy đủ. */
+function accumulateToolCallDeltas(acc, deltas) {
+  for (const delta of deltas) {
+    const index = delta.index ?? 0;
+    if (!acc.has(index)) acc.set(index, { id: '', type: 'function', function: { name: '', arguments: '' } });
+    const entry = acc.get(index);
+    if (delta.id) entry.id = delta.id;
+    if (delta.function?.name) entry.function.name += delta.function.name;
+    if (delta.function?.arguments) entry.function.arguments += delta.function.arguments;
+  }
+}
+
+/** Kiểm tra `tool_calls` trong PHẢN HỒI (không phải delta stream); `null` nếu không có. */
+function normalizeToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls) || !toolCalls.length) return null;
+  return toolCalls
+    .filter((c) => c && c.function && typeof c.function.name === 'string')
+    .map((c) => ({
+      id: c.id || '',
+      type: 'function',
+      function: { name: c.function.name, arguments: typeof c.function.arguments === 'string' ? c.function.arguments : '{}' }
+    }));
 }
 
 /** Chuẩn hóa `usage` về đúng ba khóa của OpenAI để lớp trên ghi log không phải đoán. */
@@ -212,3 +268,4 @@ function normalizeUsage(usage) {
 
 module.exports = BaseProvider;
 module.exports.normalizeUsage = normalizeUsage;
+module.exports.normalizeToolCalls = normalizeToolCalls;

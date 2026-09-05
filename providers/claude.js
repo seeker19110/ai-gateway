@@ -3,7 +3,7 @@ const { UpstreamError } = require('../lib/errors');
 const { parseSSEJson } = require('../lib/sse');
 const { readRateLimit } = require('../lib/ratelimit');
 const { toAnthropic } = require('../lib/params');
-const { toAlternating } = require('../lib/messages');
+const { toAlternating, splitSystem, dropLeadingAssistant } = require('../lib/messages');
 
 const URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MAX_TOKENS = 4096;
@@ -19,6 +19,7 @@ class ClaudeProvider extends BaseProvider {
       paramSupport: ['temperature', 'top_p', 'top_k', 'max_tokens', 'stop'],
       // `temperature` của Anthropic chỉ tới 1, trong khi chuẩn OpenAI cho tới 2.
       paramRanges: { temperature: [0, 1], top_p: [0, 1], top_k: [1, 500] },
+      supportsTools: true,
       ...options
     });
     this.defaultMaxTokens = options.defaultMaxTokens || DEFAULT_MAX_TOKENS;
@@ -45,12 +46,13 @@ class ClaudeProvider extends BaseProvider {
       .filter((block) => block.type === 'text')
       .map((block) => block.text)
       .join('');
+    const toolCalls = anthropicToolCalls(data?.content);
 
-    if (!text) {
+    if (!text && !toolCalls) {
       throw new UpstreamError('Claude trả về phản hồi rỗng hoặc sai định dạng', 502);
     }
 
-    return { text, usage: anthropicUsage(data.usage), rateLimit };
+    return { text, toolCalls, usage: anthropicUsage(data.usage), rateLimit };
   }
 
   async *stream(messages, apiKey, { model, params = {} } = {}) {
@@ -67,15 +69,30 @@ class ClaudeProvider extends BaseProvider {
     // Anthropic đếm token đầu vào ở `message_start` và token đầu ra ở `message_delta`;
     // gộp lại mới ra usage đầy đủ.
     let promptTokens = 0;
+    // Lời gọi hàm tới theo `content_block_start` (mở khối, mang id + tên) rồi
+    // `content_block_delta` kiểu `input_json_delta` (mảnh JSON của tham số) — khác hẳn
+    // khuôn `tool_calls` một cục của OpenAI, nên phải gom theo `index` tới `message_stop`.
+    const toolBlocks = new Map();
 
     for await (const { payload } of parseSSEJson(response)) {
       switch (payload?.type) {
         case 'message_start':
           promptTokens = Number(payload.message?.usage?.input_tokens) || 0;
           break;
+        case 'content_block_start':
+          if (payload.content_block?.type === 'tool_use') {
+            toolBlocks.set(payload.index, {
+              id: payload.content_block.id,
+              name: payload.content_block.name,
+              args: ''
+            });
+          }
+          break;
         case 'content_block_delta':
           if (payload.delta?.type === 'text_delta' && payload.delta.text) {
             yield { text: payload.delta.text };
+          } else if (payload.delta?.type === 'input_json_delta' && toolBlocks.has(payload.index)) {
+            toolBlocks.get(payload.index).args += payload.delta.partial_json || '';
           }
           break;
         case 'message_delta': {
@@ -89,6 +106,17 @@ class ClaudeProvider extends BaseProvider {
           };
           break;
         }
+        case 'message_stop':
+          if (toolBlocks.size) {
+            yield {
+              toolCalls: [...toolBlocks.values()].map((t) => ({
+                id: t.id,
+                type: 'function',
+                function: { name: t.name, arguments: t.args || '{}' }
+              }))
+            };
+          }
+          break;
         case 'error':
           // Anthropic báo lỗi giữa stream bằng một sự kiện, HTTP vẫn là 200. `overloaded_error`
           // là ca thường gặp nhất và nó đáng được xoay vòng như một 529, nên phải mang đúng
@@ -102,7 +130,8 @@ class ClaudeProvider extends BaseProvider {
   }
 
   buildBody(messages, params, model, apiKey) {
-    const { system, turns } = toAlternating(messages);
+    const hasTools = Array.isArray(params.tools) && params.tools.length > 0;
+    const { system, turns } = hasTools ? toAnthropicTurns(messages) : toAlternating(messages);
     const body = {
       model: model || this.model,
       // `max_tokens` là trường BẮT BUỘC của API này — thiếu nó là 400 chứ không phải một
@@ -110,6 +139,11 @@ class ClaudeProvider extends BaseProvider {
       ...this.translateParams(params),
       messages: turns
     };
+    if (hasTools) {
+      body.tools = params.tools.map(toAnthropicTool);
+      const choice = toAnthropicToolChoice(params.tool_choice);
+      if (choice) body.tool_choice = choice;
+    }
     // Token subscription (Claude Pro/Max) không đi qua Console nên không mang `system` của
     // riêng nhà phát triển — Anthropic đòi request phải tự xưng là Claude Code, nếu không
     // trả 401. API key thường (`sk-ant-api...`) không có ràng buộc này.
@@ -148,6 +182,95 @@ function anthropicHeaders(apiKey) {
     'x-api-key': apiKey,
     'anthropic-version': '2023-06-01'
   };
+}
+
+/**
+ * Chuyển hội thoại có function calling sang khối nội dung Anthropic.
+ *
+ * `toAlternating` (dùng cho lượt chat thường) gộp mọi content về CHUỖI — không đủ chỗ chứa
+ * `tool_use`/`tool_result`, hai loại khối bắt buộc phải mang `id` gắn với đúng lời gọi.
+ * Nên khi request có `tools`, hội thoại đi qua đường riêng này: build khối trước, merge
+ * lượt liên tiếp sau (nối MẢNG thay vì nối chuỗi).
+ */
+function toAnthropicTurns(messages) {
+  const { system, chat } = splitSystem(messages);
+  const blocks = dropLeadingAssistant(chat.map(messageToAnthropicBlocks));
+  const turns = mergeAnthropicConsecutive(blocks);
+  if (!turns.length) {
+    throw new UpstreamError('Hội thoại phải có ít nhất một lượt của user', 400);
+  }
+  return { system, turns };
+}
+
+function messageToAnthropicBlocks(m) {
+  if (m.role === 'tool') {
+    // Kết quả hàm là một khối `tool_result` gắn trong lượt USER kế tiếp — Anthropic không
+    // có vai `tool` riêng, tool_result đứng chung hàng với input của người dùng.
+    return { role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content || '' }] };
+  }
+  if (m.role === 'assistant' && m.tool_calls) {
+    const content = [];
+    if (m.content) content.push({ type: 'text', text: m.content });
+    for (const call of m.tool_calls) {
+      let input = {};
+      try {
+        input = JSON.parse(call.function.arguments || '{}');
+      } catch {
+        input = {};
+      }
+      content.push({ type: 'tool_use', id: call.id, name: call.function.name, input });
+    }
+    return { role: 'assistant', content };
+  }
+  return { role: m.role, content: [{ type: 'text', text: m.content || '' }] };
+}
+
+/** Như `mergeConsecutive` nhưng nối MẢNG khối thay vì nối chuỗi. */
+function mergeAnthropicConsecutive(chat) {
+  const out = [];
+  for (const m of chat) {
+    const last = out[out.length - 1];
+    if (last && last.role === m.role) {
+      last.content = last.content.concat(m.content);
+    } else {
+      out.push({ role: m.role, content: m.content.slice() });
+    }
+  }
+  return out;
+}
+
+/** Khai báo hàm chuẩn OpenAI → phương ngữ Anthropic (`input_schema` thay vì `parameters`). */
+function toAnthropicTool(tool) {
+  return {
+    name: tool.function.name,
+    description: tool.function.description || '',
+    input_schema: tool.function.parameters || { type: 'object', properties: {} }
+  };
+}
+
+/**
+ * `tool_choice` chuẩn OpenAI → Anthropic. `"none"` không có tương đương trực tiếp (Anthropic
+ * chỉ tắt được tool bằng cách không gửi `tools`), nên bị bỏ qua ở đây — an toàn hơn từ chối
+ * cả request vì model vẫn có thể chọn không gọi hàm nào với `type:"auto"`.
+ */
+function toAnthropicToolChoice(choice) {
+  if (!choice || choice === 'auto' || choice === 'none') return undefined;
+  if (choice === 'required') return { type: 'any' };
+  if (typeof choice === 'object' && choice.type === 'function') {
+    return { type: 'tool', name: choice.function.name };
+  }
+  return undefined;
+}
+
+/** Khối `tool_use` trong phản hồi → `tool_calls` chuẩn OpenAI; `null` nếu không có. */
+function anthropicToolCalls(content) {
+  const blocks = (content || []).filter((b) => b.type === 'tool_use');
+  if (!blocks.length) return null;
+  return blocks.map((b) => ({
+    id: b.id,
+    type: 'function',
+    function: { name: b.name, arguments: JSON.stringify(b.input || {}) }
+  }));
 }
 
 function anthropicUsage(usage = {}) {
