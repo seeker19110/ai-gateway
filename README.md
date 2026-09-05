@@ -247,6 +247,42 @@ Tham số được chuyển tiếp: `temperature`, `top_p`, `top_k`, `max_tokens
 `presence_penalty`, `frequency_penalty`, `response_format`, `user` — mỗi cái được dịch sang
 phương ngữ của nhà cung cấp đang phục vụ, và bị lọc bỏ ở nhà nào không có nó.
 
+### Function calling
+
+`tools` (khai báo hàm chuẩn OpenAI) và `tool_choice` được nhận ở cả `/v1/chat/completions`
+lẫn `/api/chat`, cho cả stream lẫn không:
+
+```python
+client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Hà Nội hôm nay thế nào?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Lấy thời tiết hiện tại của một thành phố",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            }
+        }
+    }],
+    tool_choice="auto",
+)
+```
+
+Phản hồi mang `choices[0].message.tool_calls` (và `finish_reason: "tool_calls"`) đúng khuôn
+OpenAI dù model thật đang phục vụ là Groq hay Claude. Gửi kết quả hàm về bằng một message
+`{"role": "tool", "tool_call_id": "...", "content": "..."}` nối tiếp theo message assistant
+mang `tool_calls` — đúng vòng lặp chuẩn OpenAI.
+
+Vì mỗi nhà cung cấp biểu diễn function calling một cách khác nhau, request có `tools` chỉ
+xoay vào những nhà đã nói được nó (xem "Giới hạn đã biết") — kể cả khi `model` ghim thẳng
+một nhà không hỗ trợ (`model: "gemini"` chẳng hạn), pool vẫn rơi về những nhà còn lại thay
+vì gửi bừa cho Gemini rồi bị bỏ qua hàm âm thầm. Chỉ khi KHÔNG còn nhà nào hỗ trợ `tools`
+trong số các tài khoản đang dùng được thì gateway mới trả 400 nói rõ lý do.
+
 ### Stream
 
 `stream: true` trả SSE đúng khuôn OpenAI (`chat.completion.chunk`, kết bằng `data: [DONE]`).
@@ -306,8 +342,14 @@ theo tên nhà cung cấp) vẫn đọc được, hiểu là "cả nhà cung c�
   hạn mức cho cả tổ chức, nên hai key cùng dự án sẽ hết quota cùng lúc và việc thêm key thứ
   hai không mua thêm được gì. Xen kẽ theo nhà cung cấp làm điều này chỉ tốn một lần thử thừa
   mỗi vòng, nhưng không sửa được gốc: muốn nhân hạn mức thì key phải thuộc dự án/tổ chức khác.
-- **Chỉ chuyển văn bản.** Ảnh, audio, tool/function call chưa đi qua được gateway — và bị từ
-  chối rõ ràng bằng 400 thay vì bị lặng lẽ bỏ đi.
+- **Chỉ chuyển văn bản.** Ảnh, audio chưa đi qua được gateway — và bị từ chối rõ ràng bằng
+  400 thay vì bị lặng lẽ bỏ đi.
+- **Tool/function calling** đi qua được ở 8/10 nhà cung cấp: bảy nhà chuẩn OpenAI (OpenAI,
+  Groq, OpenRouter, Mistral, Cerebras, DeepSeek, Together — passthrough nguyên `tools`/
+  `tool_choice`) và Anthropic Claude (dịch sang `input_schema`/`tool_use`/`tool_result`).
+  Gemini và Cohere chưa dịch được phương ngữ riêng của họ, nên khi request có `tools`, pool
+  tự loại hai nhà này khỏi danh sách ứng viên thay vì gửi bừa rồi bị bỏ qua âm thầm; nếu
+  không còn ai hỗ trợ, gateway trả 400 nói rõ lý do thay vì 404/lỗi mơ hồ từ upstream.
 - **Nhiều tiến trình dùng chung file cooldown là "cố gắng hết sức", không phải khóa.** File
   được ghi nguyên tử nên không bao giờ đọc phải JSON cụt, nhưng hai tiến trình cùng ghi thì
   bên ghi sau thắng, và cooldown chỉ được đọc lại lúc khởi động — nên trong một phiên chạy,
