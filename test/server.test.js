@@ -1,13 +1,28 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const { createApp } = require('../lib/app');
 const { fakePool, acct, silentLogger } = require('./helpers');
 
-/** Dựng app trên pool giả và mở cổng ngẫu nhiên; trả về `fetch` đã gắn base URL. */
-async function withServer(spec, fn) {
-  const { providers, pool } = fakePool(spec);
-  const app = createApp({ providers, pool, logger: silentLogger(), store: null });
+/** Thư mục trạng thái riêng cho mỗi lần gọi: không đụng tới `~/.ai-gateway` thật khi test. */
+function tmpStateDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'ai-gateway-state-'));
+}
+
+/**
+ * Dựng app trên pool giả và mở cổng ngẫu nhiên; trả về `fetch` đã gắn base URL.
+ *
+ * Pool và app phải dùng CHUNG một `env` (cùng `GATEWAY_STATE_DIR`): đăng nhập subscription
+ * ghi token xuống đĩa theo `env` của app, còn `pool.configure()` đọc lại token đó theo
+ * `env` mà chính pool được dựng bằng — hai object khác nhau (dù cùng giá trị) là pool sẽ
+ * không bao giờ thấy token vừa đăng nhập.
+ */
+async function withServer(spec, fn, { env = { GATEWAY_STATE_DIR: tmpStateDir() } } = {}) {
+  const { providers, pool } = fakePool(spec, { env });
+  const app = createApp({ providers, pool, logger: silentLogger(), store: null, env });
 
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -444,5 +459,65 @@ test('GET/DELETE /mcp: không hỗ trợ server-push (405), đóng phiên chủ 
 
     const delAgain = await fetch(`${base}/mcp`, { method: 'DELETE', headers: { 'Mcp-Session-Id': sessionId } });
     assert.equal(delAgain.status, 404);
+  });
+});
+
+test('POST /api/claude/oauth/start rồi callback: đăng nhập xong thì pool có tài khoản claude-subscription', async () => {
+  const { stubFetch, jsonResponse } = require('./helpers');
+  await withServer({ claude: [] }, async (call) => {
+    const { status: startStatus, body: start } = await call('/api/claude/oauth/start', { method: 'POST' });
+    assert.equal(startStatus, 200);
+    assert.ok(start.state, 'phải trả state để đối chiếu ở bước callback');
+    assert.match(start.url, /^https:\/\/claude\.ai\/oauth\/authorize\?/);
+
+    // `stubFetch` thay `global.fetch` cho CẢ TIẾN TRÌNH — kể cả lệnh gọi HTTP của chính test
+    // này tới server cục bộ (`call()` bên dưới cũng đi qua `fetch`). Chỉ chặn đúng URL của
+    // Anthropic, mọi request khác forward về `fetch` gốc.
+    const originalFetch = global.fetch;
+    const stub = stubFetch(async (url, init) => {
+      if (!url.startsWith('https://console.anthropic.com/')) return originalFetch(url, init);
+      return jsonResponse(200, { access_token: 'sk-ant-oat-xxx', refresh_token: 'rt', expires_in: 3600 });
+    });
+    let cb;
+    try {
+      cb = await call('/api/claude/oauth/callback', json({ code: `real-code#${start.state}`, state: start.state }));
+    } finally {
+      stub.restore();
+    }
+    assert.equal(cb.status, 200);
+    assert.equal(cb.body.ok, true);
+
+    const status = await call('/api/claude/oauth/status', { method: 'GET' });
+    assert.equal(status.body.loggedIn, true);
+
+    const providerStatus = await call('/api/providers/status', { method: 'GET' });
+    const labels = providerStatus.body.claude.accounts.map((a) => a.label);
+    assert.ok(labels.includes('claude-subscription'), `phải thấy tài khoản claude-subscription trong: ${labels}`);
+  });
+});
+
+test('POST /api/claude/oauth/callback: state sai hoặc không tồn tại thì bị từ chối, không lộ verifier', async () => {
+  await withServer({ claude: [] }, async (call) => {
+    const missing = await call('/api/claude/oauth/callback', json({ code: 'abc#xyz', state: 'khong-ton-tai' }));
+    assert.equal(missing.status, 400);
+
+    const { body: start } = await call('/api/claude/oauth/start', { method: 'POST' });
+    const wrongState = await call('/api/claude/oauth/callback', json({ code: 'abc#khac', state: start.state }));
+    // exchangeCode nhận state khác `expectedState` (đọc từ chính mã) → lỗi 400 từ claudeOAuth,
+    // đi qua nhánh `fail()` chung chứ không phải nhánh "phiên không tồn tại".
+    assert.equal(wrongState.status, 400);
+  });
+});
+
+test('DELETE /api/claude/oauth: đăng xuất thì status báo loggedIn=false', async () => {
+  await withServer({ claude: [] }, async (call) => {
+    const before = await call('/api/claude/oauth/status', { method: 'GET' });
+    assert.equal(before.body.loggedIn, false);
+
+    const del = await call('/api/claude/oauth', { method: 'DELETE' });
+    assert.equal(del.status, 200);
+
+    const after = await call('/api/claude/oauth/status', { method: 'GET' });
+    assert.equal(after.body.loggedIn, false);
   });
 });
