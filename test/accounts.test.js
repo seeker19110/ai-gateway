@@ -195,6 +195,14 @@ test('mọi key của một nhà đều nghỉ thì nhà đó mới là rate_lim
   assert.equal(pool.statuses().a.status, 'rate_limited');
 });
 
+test('hết lượt RPM (không cooldown) thì nhà là `throttled`, khác hẳn `rate_limited`', () => {
+  const { pool } = fakePool({ a: [] });
+  const account = pool.accountsOf('a')[0];
+  account.maxRPM = 1;
+  account.trackRequest(); // đúng đầy cửa sổ RPM, chưa hề cooldown
+  assert.equal(pool.statuses().a.status, 'throttled');
+});
+
 test('nhà chưa có key nào là `inactive`, khác hẳn hết quota', () => {
   const providers = fakePool({ a: [] }).providers;
   const pool = new AccountPool(providers, { env: {} });

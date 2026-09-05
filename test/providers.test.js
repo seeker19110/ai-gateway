@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { createProviders } = require('../lib/providers');
 const { UpstreamError } = require('../lib/errors');
 const { stubFetch, jsonResponse } = require('./helpers');
+const BaseProvider = require('../providers/base');
 
 const MSG = [
   { role: 'system', content: 'Bạn là trợ lý.' },
@@ -404,3 +405,186 @@ test('testConnection không ghi trạng thái lên provider dùng chung', async 
     }
   );
 });
+
+test('testConnection: key hợp lệ trả ok:true kèm thông điệp thành công', async () => {
+  const { groq } = createProviders({});
+  await withFetch(okOpenAI, async () => {
+    const outcome = await groq.testConnection('key-tot');
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.message, /thành công/);
+  });
+});
+
+test('BaseProvider trần: chat()/stream() mặc định báo "chưa cài đặt" thay vì im lặng trả rỗng', async () => {
+  const bare = new BaseProvider('bare', 'Bare Provider');
+  await assert.rejects(() => bare.chat(), /chưa cài đặt chat/);
+  await assert.rejects(
+    (async () => { for await (const _ of bare.stream()) { /* không tới được đây */ } })(),
+    (err) => err instanceof UpstreamError && err.statusCode === 501
+  );
+});
+
+// ---------- stream() của từng nhà cung cấp có phương ngữ riêng ----------
+
+/** Response SSE giả: mỗi dòng `data: {...}` một sự kiện, kết thúc bằng `[DONE]`. */
+function sseOf(events) {
+  const body = events.map((e) => `data: ${typeof e === 'string' ? e : JSON.stringify(e)}\n\n`).join('') + 'data: [DONE]\n\n';
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    body: (async function* () { yield Buffer.from(body); })()
+  };
+}
+
+async function collectStream(gen) {
+  const out = { texts: [], usage: null };
+  for await (const piece of gen) {
+    if (piece.text) out.texts.push(piece.text);
+    if (piece.usage) out.usage = piece.usage;
+  }
+  return out;
+}
+
+test('Claude stream: gộp text từ content_block_delta, usage từ message_start + message_delta', async () => {
+  const { claude } = createProviders({});
+  await withFetch(
+    () => sseOf([
+      { type: 'message_start', message: { usage: { input_tokens: 5 } } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'xin ' } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'chào' } },
+      { type: 'message_delta', usage: { output_tokens: 2 } }
+    ]),
+    async () => {
+      const { texts, usage } = await collectStream(claude.stream(MSG, 'sk-ant'));
+      assert.equal(texts.join(''), 'xin chào');
+      assert.deepEqual(usage, { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+    }
+  );
+});
+
+test('Claude stream: sự kiện "error" giữa stream mang đúng mã (529 cho overloaded_error, 502 cho lỗi khác)', async () => {
+  const { claude } = createProviders({});
+  await withFetch(
+    () => sseOf([{ type: 'error', error: { type: 'overloaded_error', message: 'quá tải' } }]),
+    async () => {
+      await assert.rejects(
+        collectStream(claude.stream(MSG, 'sk-ant')),
+        (err) => err instanceof UpstreamError && err.statusCode === 529
+      );
+    }
+  );
+  await withFetch(
+    () => sseOf([{ type: 'error', error: { type: 'khac', message: 'lỗi lạ' } }]),
+    async () => {
+      await assert.rejects(
+        collectStream(claude.stream(MSG, 'sk-ant')),
+        (err) => err instanceof UpstreamError && err.statusCode === 502
+      );
+    }
+  );
+});
+
+test('Claude chat: phản hồi rỗng (không có block text nào) thì báo lỗi 502 rõ ràng', async () => {
+  const { claude } = createProviders({});
+  await withFetch(
+    async () => jsonResponse(200, { content: [{ type: 'thinking', thinking: 'chỉ nghĩ, không nói' }] }),
+    async () => {
+      await assert.rejects(
+        () => claude.chat(MSG, 'sk-ant'),
+        (err) => err instanceof UpstreamError && err.statusCode === 502
+      );
+    }
+  );
+});
+
+test('Gemini stream: gộp text, chỉ giữ usageMetadata của mẩu cuối', async () => {
+  const { gemini } = createProviders({});
+  await withFetch(
+    () => sseOf([
+      { candidates: [{ content: { parts: [{ text: 'xin ' }] } }] },
+      { candidates: [{ content: { parts: [{ text: 'chào' }] } }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2, totalTokenCount: 5 } }
+    ]),
+    async () => {
+      const { texts, usage } = await collectStream(gemini.stream(MSG, 'key'));
+      assert.equal(texts.join(''), 'xin chào');
+      assert.deepEqual(usage, { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 });
+    }
+  );
+});
+
+test('Gemini stream: bị chặn nội dung (finishReason khác STOP, chưa có chữ nào) thì báo lỗi rõ lý do', async () => {
+  const { gemini } = createProviders({});
+  await withFetch(
+    () => sseOf([{ candidates: [{ finishReason: 'SAFETY' }] }]),
+    async () => {
+      await assert.rejects(
+        collectStream(gemini.stream(MSG, 'key')),
+        (err) => err instanceof UpstreamError && /SAFETY/.test(err.message)
+      );
+    }
+  );
+});
+
+test('Cohere chat: phản hồi rỗng (không có content nào) thì báo lỗi 502 rõ ràng', async () => {
+  const { cohere } = createProviders({});
+  await withFetch(
+    async () => jsonResponse(200, { message: { content: [] } }),
+    async () => {
+      await assert.rejects(
+        () => cohere.chat(MSG, 'key'),
+        (err) => err instanceof UpstreamError && err.statusCode === 502
+      );
+    }
+  );
+});
+
+test('Cohere stream: content-delta gộp text, message-end mang usage', async () => {
+  const { cohere } = createProviders({});
+  await withFetch(
+    () => sseOf([
+      { type: 'content-delta', delta: { message: { content: { text: 'xin ' } } } },
+      { type: 'content-delta', delta: { message: { content: { text: 'chào' } } } },
+      { type: 'message-end', delta: { usage: { tokens: { input_tokens: 4, output_tokens: 2 } } } }
+    ]),
+    async () => {
+      const { texts, usage } = await collectStream(cohere.stream(MSG, 'key'));
+      assert.equal(texts.join(''), 'xin chào');
+      assert.deepEqual(usage, { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 });
+    }
+  );
+});
+
+// ---------- provider chỉ khác nhau ở URL/dialect OpenAI ----------
+
+for (const [name, url] of [
+  ['openai', 'https://api.openai.com/v1/chat/completions'],
+  ['together', 'https://api.together.xyz/v1/chat/completions'],
+  ['openrouter', 'https://openrouter.ai/api/v1/chat/completions'],
+  ['deepseek', 'https://api.deepseek.com/chat/completions']
+]) {
+  test(`${name}: chat() gọi đúng URL và đọc được phản hồi`, async () => {
+    const providers = createProviders({});
+    await withFetch(okOpenAI, async (stub) => {
+      const result = await providers[name].chat(MSG, 'key');
+      assert.equal(result.text, 'xin chào');
+      assert.equal(stub.calls[0].url, url);
+    });
+  });
+
+  test(`${name}: stream() gộp text và usage`, async () => {
+    const providers = createProviders({});
+    await withFetch(
+      () => sseOf([
+        { choices: [{ delta: { content: 'xin ' } }] },
+        { choices: [{ delta: { content: 'chào' } }] },
+        { choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }
+      ]),
+      async () => {
+        const { texts, usage } = await collectStream(providers[name].stream(MSG, 'key'));
+        assert.equal(texts.join(''), 'xin chào');
+        assert.deepEqual(usage, { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 });
+      }
+    );
+  });
+}

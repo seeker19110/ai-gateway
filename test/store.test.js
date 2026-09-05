@@ -162,3 +162,21 @@ test('không có store thì router vẫn chạy bình thường', async () => {
 
   assert.equal((await router.chat([{ role: 'user', content: 'chào' }])).text, 'ổn');
 });
+
+test('write(): ghi thất bại (đường dẫn không dùng được) thì ném lỗi mang code STORE_WRITE_FAILED, không để lại file tạm', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-gateway-test-'));
+  // Biến chính thành phần thư mục cha thành một FILE — mkdirSync/writeFileSync bên trong nó
+  // đều phải thất bại (ENOTDIR), mô phỏng đúng "không ghi được đĩa" mà không cần đụng quyền hệ thống.
+  const blockerFile = path.join(dir, 'khong-phai-thu-muc');
+  fs.writeFileSync(blockerFile, 'chỉ là một file');
+  const store = new CooldownStore(path.join(blockerFile, 'cooldowns.json'));
+
+  assert.throws(() => store.write({}), (err) => err.code === 'STORE_WRITE_FAILED');
+  assert.deepEqual(fs.readdirSync(dir), ['khong-phai-thu-muc'], 'không được để lại file .tmp dở dang');
+});
+
+test('defaultStorePath: không truyền filePath thì CooldownStore tự dùng mặc định, vẫn hoạt động được', () => {
+  const store = new CooldownStore();
+  assert.match(store.filePath, /\.ai-gateway[/\\]cooldowns\.json$/);
+  assert.deepEqual(store.read(), { accounts: {}, providers: {} });
+});

@@ -71,6 +71,74 @@ test('POST /api/chat khi pool kiệt thì trả 429 kèm trạng thái', async (
   });
 });
 
+test('POST /api/chat: lỗi không phải UpstreamError (history hỏng dạng) vẫn trả 500 JSON, không rò stack trace', async () => {
+  await withServer({ a: [] }, async (call) => {
+    // `history` không phải mảng khiến `[...history, ...]` ném TypeError ngay trong try —
+    // một lỗi hoàn toàn khác lớp với UpstreamError, phải đi qua nhánh `fail()` chung.
+    const { status, body } = await call('/api/chat', json({ message: 'chào', history: 42 }));
+    assert.equal(status, 500);
+    assert.equal(body.error.message, 'Lỗi máy chủ nội bộ');
+  });
+});
+
+test('POST /api/providers/test: thiếu provider/apiKey hoặc provider lạ đều bị từ chối rõ ràng', async () => {
+  await withServer({ a: [] }, async (call) => {
+    const missing = await call('/api/providers/test', json({}));
+    assert.equal(missing.status, 400);
+
+    const unknown = await call('/api/providers/test', json({ provider: 'khong-ton-tai', apiKey: 'k' }));
+    assert.equal(unknown.status, 404);
+
+    const noKey = await call('/api/providers/test', json({ provider: 'a', apiKey: '   ' }));
+    assert.equal(noKey.status, 400);
+  });
+});
+
+test('POST /api/providers/test: một key thành công thì báo message riêng, không phải dạng "x/y"', async () => {
+  await withServer({ a: [{ ok: 'chào' }] }, async (call) => {
+    const { body } = await call('/api/providers/test', json({ provider: 'a', apiKey: 'key-a-1' }));
+    assert.equal(body.success, true);
+    assert.equal(body.okCount, 1);
+    assert.equal(body.total, 1);
+    assert.match(body.message, /thành công/);
+    assert.equal(body.results[0].success, true);
+  });
+});
+
+test('POST /api/providers/test: nhiều key thì báo rõ tỉ lệ và từng key hỏng/sống, key luôn bị che', async () => {
+  await withServer({ a: { 'key-tot': [{ ok: 'chào' }], 'key-hong': [{ status: 401, body: '{"error":"sai key"}' }] } }, async (call) => {
+    const { body } = await call('/api/providers/test', json({ provider: 'a', apiKey: 'key-tot\nkey-hong' }));
+    assert.equal(body.okCount, 1);
+    assert.equal(body.total, 2);
+    assert.equal(body.message, '1/2 key kết nối được');
+    assert.deepEqual(body.results.map((r) => r.success), [true, false]);
+    assert.ok(body.results.every((r) => !r.key.includes('key-tot') && !r.key.includes('key-hong')), 'key thật không được lộ ra ngoài');
+  });
+});
+
+test('createApp: có cooldown sẵn trên đĩa thì log số tài khoản đã khôi phục khi khởi động', async () => {
+  const fs2 = require('fs');
+  const os2 = require('os');
+  const path2 = require('path');
+  const { CooldownStore } = require('../lib/store');
+  const { silentLogger: makeSilentLogger } = require('./helpers');
+
+  const dir = fs2.mkdtempSync(path2.join(os2.tmpdir(), 'ai-gateway-store-'));
+  const store = new CooldownStore(path2.join(dir, 'cooldowns.json'));
+
+  const { providers, pool } = fakePool({ a: [{ status: 429 }] });
+  acct(pool, 'a').markUnavailable(429);
+  store.persist(pool);
+
+  // Pool MỚI (giả lập một tiến trình khác khởi động lại): `createApp` phải tự gọi
+  // `store.restore()` và ghi log số tài khoản khôi phục được — đây là dòng chưa test.
+  const { pool: freshPool } = fakePool({ a: [{ status: 429 }] });
+  const logger = makeSilentLogger();
+  createApp({ providers, pool: freshPool, logger, store });
+
+  assert.ok(logger.lines.some((l) => /Khôi phục cooldown cho 1 tài khoản/.test(l)));
+});
+
 test('POST /v1/chat/completions trả đúng hình dạng OpenAI', async () => {
   await withServer({ a: [{ ok: 'chào bạn' }] }, async (call) => {
     const { status, body } = await call(
@@ -306,6 +374,16 @@ test('stream xoay vòng được TRƯỚC mẩu đầu tiên', async () => {
       assert.equal(acct(pool, 'a').isCoolingDown(), true);
     }
   );
+});
+
+test('stream: mọi ứng viên đều hỏng trước mẩu đầu thì hết candidates, báo lỗi rõ ràng', async () => {
+  await withServer({ a: [{ status: 503 }], b: [{ status: 503 }] }, async (_c, _p, base) => {
+    const res = await fetch(`${base}/v1/chat/completions`, json({
+      messages: [{ role: 'user', content: 'chào' }],
+      stream: true
+    }));
+    assert.equal(res.status, 502, 'hết ứng viên vì lỗi phía họ (5xx) phải báo 502, không phải 429');
+  });
 });
 
 test('stream lỗi trước mẩu đầu vẫn trả được status HTTP thật', async () => {
