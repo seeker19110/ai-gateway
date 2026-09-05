@@ -132,3 +132,44 @@ test('refreshIfNeeded: sắp hết hạn và có refreshToken thì làm mới v�
     stub.restore();
   }
 });
+
+test('exchangeCode: lỗi mạng khi đổi token thì ném UpstreamError 503 kèm isNetworkError', async () => {
+  const stub = stubFetch(async () => { throw new Error('ECONNRESET'); });
+  try {
+    await assert.rejects(
+      claudeOAuth.exchangeCode({ rawCode: 'abc#xyz', verifier: 'v', expectedState: 'xyz' }),
+      (err) => err.statusCode === 503 && err.isNetworkError === true
+    );
+  } finally {
+    stub.restore();
+  }
+});
+
+test('exchangeCode: Anthropic trả 200 nhưng thân không phải JSON hợp lệ thì báo 502', async () => {
+  const stub = stubFetch(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => 'không phải json'
+  }));
+  try {
+    await assert.rejects(
+      claudeOAuth.exchangeCode({ rawCode: 'abc#xyz', verifier: 'v', expectedState: 'xyz' }),
+      (err) => err.statusCode === 502 && /không phải JSON/.test(err.message)
+    );
+  } finally {
+    stub.restore();
+  }
+});
+
+test('loadCredential: cache TTL — sửa file trong vài giây đầu vẫn thấy giá trị cũ, save/clear xoá cache ngay', () => {
+  const env = tmpEnv();
+  claudeOAuth.saveCredential({ accessToken: 'v1' }, env);
+  assert.equal(claudeOAuth.loadCredential(env).accessToken, 'v1');
+
+  fs.writeFileSync(claudeOAuth.credentialPath(env), JSON.stringify({ accessToken: 'v2' }));
+  assert.equal(claudeOAuth.loadCredential(env).accessToken, 'v1', 'còn trong cửa sổ cache');
+
+  claudeOAuth.saveCredential({ accessToken: 'v3' }, env);
+  assert.equal(claudeOAuth.loadCredential(env).accessToken, 'v3', 'save phải xoá cache ngay, không đợi hết TTL');
+});

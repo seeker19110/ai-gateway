@@ -20,9 +20,9 @@ function tmpStateDir() {
  * `env` mà chính pool được dựng bằng — hai object khác nhau (dù cùng giá trị) là pool sẽ
  * không bao giờ thấy token vừa đăng nhập.
  */
-async function withServer(spec, fn, { env = { GATEWAY_STATE_DIR: tmpStateDir() } } = {}) {
+async function withServer(spec, fn, { env = { GATEWAY_STATE_DIR: tmpStateDir() }, ...appOptions } = {}) {
   const { providers, pool } = fakePool(spec, { env });
-  const app = createApp({ providers, pool, logger: silentLogger(), store: null, env });
+  const app = createApp({ providers, pool, logger: silentLogger(), store: null, env, ...appOptions });
 
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -462,6 +462,44 @@ test('GET/DELETE /mcp: không hỗ trợ server-push (405), đóng phiên chủ 
   });
 });
 
+test('POST /mcp: "notifications/initialized" trả 202 rỗng, phương thức lạ trả lỗi JSON-RPC -32601', async () => {
+  await withServer({ a: [] }, async (_c, _s, base) => {
+    const sessionId = await mcpInit(base);
+
+    const notif = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Mcp-Session-Id': sessionId },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    });
+    assert.equal(notif.status, 202);
+    assert.equal(await notif.text(), '');
+
+    const unknownMethod = await mcpPost(base, { jsonrpc: '2.0', id: 9, method: 'khong/ton-tai' }, { sessionId });
+    const body = JSON.parse(unknownMethod.text);
+    assert.equal(body.error.code, -32601);
+  });
+});
+
+test('POST /mcp: tools/call thiếu "message" hoặc không phải chuỗi thì isError, không ném lỗi', async () => {
+  await withServer({ a: [] }, async (_c, _s, base) => {
+    const sessionId = await mcpInit(base);
+
+    const missing = await mcpPost(
+      base,
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'chat', arguments: {} } },
+      { sessionId }
+    );
+    assert.equal(JSON.parse(missing.text).result.isError, true);
+
+    const notString = await mcpPost(
+      base,
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'chat', arguments: { message: 42 } } },
+      { sessionId }
+    );
+    assert.equal(JSON.parse(notString.text).result.isError, true);
+  });
+});
+
 test('POST /api/claude/oauth/start rồi callback: đăng nhập xong thì pool có tài khoản claude-subscription', async () => {
   const { stubFetch, jsonResponse } = require('./helpers');
   await withServer({ claude: [] }, async (call) => {
@@ -509,6 +547,22 @@ test('POST /api/claude/oauth/callback: state sai hoặc không tồn tại thì 
   });
 });
 
+test('POST /api/claude/oauth/start: phiên đăng nhập bỏ dở quá hạn thì bị dọn ở lượt start kế tiếp', async () => {
+  await withServer({ claude: [] }, async (call) => {
+    const first = await call('/api/claude/oauth/start', { method: 'POST' });
+    assert.equal(first.status, 200);
+
+    // Đợi qua hết TTL (đặt rất ngắn cho test) rồi gọi `/start` lần nữa — dòng dọn dẹp ở đầu
+    // handler phải quét thấy state cũ đã quá hạn và xoá nó khỏi bộ nhớ.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = await call('/api/claude/oauth/start', { method: 'POST' });
+    assert.equal(second.status, 200);
+
+    const stale = await call('/api/claude/oauth/callback', json({ code: `abc#${first.body.state}`, state: first.body.state }));
+    assert.equal(stale.status, 400, 'state của lượt đầu phải đã bị dọn, không dùng lại được nữa');
+  }, { loginTtlMs: 10 });
+});
+
 test('DELETE /api/claude/oauth: đăng xuất thì status báo loggedIn=false', async () => {
   await withServer({ claude: [] }, async (call) => {
     const before = await call('/api/claude/oauth/status', { method: 'GET' });
@@ -520,4 +574,52 @@ test('DELETE /api/claude/oauth: đăng xuất thì status báo loggedIn=false', 
     const after = await call('/api/claude/oauth/status', { method: 'GET' });
     assert.equal(after.body.loggedIn, false);
   });
+});
+
+test('backgroundRefresh: làm mới token sắp hết hạn trong nền và tự cập nhật pool', async () => {
+  const claudeOAuth = require('../lib/claudeOAuth');
+  const { stubFetch, jsonResponse } = require('./helpers');
+
+  const env = { GATEWAY_STATE_DIR: tmpStateDir() };
+  claudeOAuth.saveCredential({ accessToken: 'old', refreshToken: 'rt', expiresAt: Date.now() + 1000 }, env);
+
+  const originalFetch = global.fetch;
+  const stub = stubFetch(async (url, init) => {
+    if (!url.startsWith('https://console.anthropic.com/')) return originalFetch(url, init);
+    return jsonResponse(200, { access_token: 'new', refresh_token: 'rt2', expires_in: 3600 });
+  });
+  try {
+    await withServer({ claude: [] }, async (call) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const status = await call('/api/claude/oauth/status', { method: 'GET' });
+      assert.equal(status.body.loggedIn, true);
+      assert.equal(claudeOAuth.loadCredential(env).accessToken, 'new', 'timer nền phải đã ghi token mới xuống đĩa');
+    }, { env, backgroundRefresh: true, refreshIntervalMs: 10 });
+  } finally {
+    stub.restore();
+  }
+});
+
+test('backgroundRefresh: refresh lỗi mạng thì chỉ ghi log cảnh báo, server vẫn phục vụ bình thường', async () => {
+  const claudeOAuth = require('../lib/claudeOAuth');
+  const { stubFetch } = require('./helpers');
+
+  const env = { GATEWAY_STATE_DIR: tmpStateDir() };
+  claudeOAuth.saveCredential({ accessToken: 'old', refreshToken: 'rt', expiresAt: Date.now() + 1000 }, env);
+
+  const originalFetch = global.fetch;
+  const stub = stubFetch(async (url, init) => {
+    if (!url.startsWith('https://console.anthropic.com/')) return originalFetch(url, init);
+    throw new Error('mạng hỏng');
+  });
+  try {
+    await withServer({ claude: [] }, async (call) => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const status = await call('/api/claude/oauth/status', { method: 'GET' });
+      assert.equal(status.status, 200, 'lỗi refresh nền không được làm sập server');
+      assert.equal(claudeOAuth.loadCredential(env).accessToken, 'old', 'refresh lỗi thì không ghi đè token cũ');
+    }, { env, backgroundRefresh: true, refreshIntervalMs: 10 });
+  } finally {
+    stub.restore();
+  }
 });
