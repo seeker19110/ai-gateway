@@ -335,3 +335,114 @@ test('stream khi pool kiệt thì trả 429, không mở SSE', async () => {
     assert.equal(res.status, 429);
   });
 });
+
+/** POST thô tới `/mcp`, giữ nguyên header phản hồi (test session/SSE cần đọc `Mcp-Session-Id`). */
+async function mcpPost(base, body, { sessionId, accept = 'application/json' } = {}) {
+  const res = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: accept,
+      ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  const sessionHeader = res.headers.get('mcp-session-id');
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+  return { status: res.status, sessionHeader, contentType, text };
+}
+
+async function mcpInit(base) {
+  const res = await mcpPost(base, { jsonrpc: '2.0', id: 1, method: 'initialize' });
+  return res.sessionHeader;
+}
+
+test('POST /mcp: initialize cấp session, tools/list không kèm session bị từ chối', async () => {
+  await withServer({ a: [{ ok: 'xin chào' }] }, async (_c, _s, base) => {
+    const init = await mcpPost(base, { jsonrpc: '2.0', id: 1, method: 'initialize' });
+    assert.equal(init.status, 200);
+    assert.ok(init.sessionHeader, 'phải cấp Mcp-Session-Id');
+    assert.equal(JSON.parse(init.text).result.protocolVersion, '2024-11-05');
+
+    const noSession = await mcpPost(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    assert.equal(noSession.status, 400, 'thiếu Mcp-Session-Id phải bị từ chối theo spec');
+
+    const unknownSession = await mcpPost(base, { jsonrpc: '2.0', id: 3, method: 'tools/list' }, { sessionId: 'khong-ton-tai' });
+    assert.equal(unknownSession.status, 404, 'session lạ phải trả 404 để client tự init lại');
+
+    const list = await mcpPost(base, { jsonrpc: '2.0', id: 4, method: 'tools/list' }, { sessionId: init.sessionHeader });
+    assert.equal(list.status, 200);
+    assert.equal(JSON.parse(list.text).result.tools[0].name, 'chat');
+  });
+});
+
+test('POST /mcp: client chỉ nhận SSE thì phản hồi bằng một sự kiện text/event-stream', async () => {
+  await withServer({ a: [{ ok: 'xin chào' }] }, async (_c, _s, base) => {
+    const sessionId = await mcpInit(base);
+    const res = await mcpPost(
+      base,
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { sessionId, accept: 'text/event-stream' }
+    );
+    assert.equal(res.status, 200);
+    assert.match(res.contentType, /text\/event-stream/);
+    assert.match(res.text, /^data: /);
+    const payload = JSON.parse(res.text.replace(/^data: /, '').trim());
+    assert.equal(payload.result.tools[0].name, 'chat');
+  });
+});
+
+test('POST /mcp: tools/call "chat" đi qua đúng router, xoay vòng như /api/chat', async () => {
+  await withServer({ a: [{ ok: 'xin chào' }], b: [] }, async (_c, _s, base) => {
+    const sessionId = await mcpInit(base);
+    const res = await mcpPost(
+      base,
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'chat', arguments: { message: 'chào' } } },
+      { sessionId }
+    );
+    const body = JSON.parse(res.text);
+    assert.equal(res.status, 200);
+    assert.equal(body.result.content[0].text, 'xin chào');
+    assert.equal(body.result.isError, undefined);
+  });
+});
+
+test('POST /mcp: tool lạ hoặc pool kiệt trả isError, không vỡ JSON-RPC', async () => {
+  await withServer({ a: [] }, async (_c, { pool }, base) => {
+    acct(pool, 'a').markUnavailable(429);
+    const sessionId = await mcpInit(base);
+
+    const exhausted = await mcpPost(
+      base,
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'chat', arguments: { message: 'chào' } } },
+      { sessionId }
+    );
+    assert.equal(JSON.parse(exhausted.text).result.isError, true);
+
+    const unknown = await mcpPost(
+      base,
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'khong-ton-tai', arguments: {} } },
+      { sessionId }
+    );
+    assert.equal(JSON.parse(unknown.text).result.isError, true);
+  });
+});
+
+test('GET/DELETE /mcp: không hỗ trợ server-push (405), đóng phiên chủ động', async () => {
+  await withServer({ a: [] }, async (_c, _s, base) => {
+    const sessionId = await mcpInit(base);
+
+    const get = await fetch(`${base}/mcp`);
+    assert.equal(get.status, 405);
+
+    const del = await fetch(`${base}/mcp`, { method: 'DELETE', headers: { 'Mcp-Session-Id': sessionId } });
+    assert.equal(del.status, 200);
+
+    const afterDelete = await mcpPost(base, { jsonrpc: '2.0', id: 6, method: 'tools/list' }, { sessionId });
+    assert.equal(afterDelete.status, 404, 'phiên đã bị xoá thì request sau phải bị từ chối');
+
+    const delAgain = await fetch(`${base}/mcp`, { method: 'DELETE', headers: { 'Mcp-Session-Id': sessionId } });
+    assert.equal(delAgain.status, 404);
+  });
+});
