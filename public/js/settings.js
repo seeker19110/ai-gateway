@@ -1,3 +1,26 @@
+/**
+ * `fetch` cho các endpoint quản trị (`/api/providers/*`, `/api/claude/oauth/*`), tự gắn
+ * `X-Admin-Token` nếu người dùng đã từng nhập. Không đụng gì khi gateway chưa bật
+ * `GATEWAY_ADMIN_TOKEN` — request đi qua bình thường vì server bỏ qua header không cần đến.
+ *
+ * Gặp 401 (token thiếu/sai) mới hỏi, không hỏi trước: đa số gateway chạy nội bộ không bật
+ * token này, và hỏi trước ở MỌI lượt mở modal cài đặt sẽ làm phiền đúng những người không
+ * cần nó.
+ */
+async function adminFetch(url, options = {}) {
+  const token = localStorage.getItem('aigateway_admin_token');
+  const withToken = (t) => ({ ...options, headers: { ...(options.headers || {}), ...(t ? { 'X-Admin-Token': t } : {}) } });
+
+  let res = await fetch(url, withToken(token));
+  if (res.status === 401) {
+    const entered = window.prompt('Endpoint quản trị này yêu cầu admin token (GATEWAY_ADMIN_TOKEN của gateway). Dán token vào đây:');
+    if (!entered) return res;
+    localStorage.setItem('aigateway_admin_token', entered);
+    res = await fetch(url, withToken(entered));
+  }
+  return res;
+}
+
 class SettingsManager {
   constructor() {
     this.providers = ['gemini', 'groq', 'openai', 'claude', 'openrouter', 'mistral', 'cerebras', 'cohere', 'deepseek', 'together'];
@@ -125,7 +148,7 @@ class SettingsManager {
   async startClaudeLogin() {
     const statusEl = document.getElementById('claude-sub-status');
     try {
-      const res = await fetch('/api/claude/oauth/start', { method: 'POST' });
+      const res = await adminFetch('/api/claude/oauth/start', { method: 'POST' });
       const { url, state } = await res.json();
       window.open(url, '_blank', 'noopener');
 
@@ -133,7 +156,7 @@ class SettingsManager {
       if (!pasted) return;
 
       statusEl.textContent = 'Đang xác thực...';
-      const cb = await fetch('/api/claude/oauth/callback', {
+      const cb = await adminFetch('/api/claude/oauth/callback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: pasted, state })
@@ -149,7 +172,7 @@ class SettingsManager {
   }
 
   async claudeLogout() {
-    await fetch('/api/claude/oauth', { method: 'DELETE' });
+    await adminFetch('/api/claude/oauth', { method: 'DELETE' });
     await this.refreshClaudeSubscriptionStatus();
   }
 
@@ -160,7 +183,7 @@ class SettingsManager {
     if (!statusEl) return;
 
     try {
-      const res = await fetch('/api/claude/oauth/status');
+      const res = await adminFetch('/api/claude/oauth/status');
       const data = await res.json();
       if (data.loggedIn) {
         statusEl.textContent = '✅ Đã đăng nhập subscription qua gateway';
@@ -249,7 +272,7 @@ class SettingsManager {
     statusEl.style.color = 'var(--text-secondary)';
     
     try {
-      const response = await fetch('/api/providers/test', {
+      const response = await adminFetch('/api/providers/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider, apiKey: keys.join('\n') })

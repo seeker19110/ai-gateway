@@ -340,6 +340,44 @@ test('GET /api/providers/status không vỡ khi query string hỏng', async () =
   });
 });
 
+// ---------- admin auth (GATEWAY_ADMIN_TOKEN) ----------
+
+test('admin auth: không đặt GATEWAY_ADMIN_TOKEN thì /api/providers và /api/claude/oauth vẫn mở như cũ', async () => {
+  await withServer({ a: [] }, async (call) => {
+    assert.equal((await call('/api/providers/status')).status, 200);
+    assert.equal((await call('/api/claude/oauth/status')).status, 200);
+  });
+});
+
+test('admin auth: đặt GATEWAY_ADMIN_TOKEN thì thiếu/sai token bị chặn 401, đúng token thì qua', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_ADMIN_TOKEN: 'bi-mat-123' };
+  await withServer({ a: [] }, async (call, _p, base) => {
+    const noAuth = await call('/api/providers/status');
+    assert.equal(noAuth.status, 401);
+    assert.match(noAuth.body.error.message, /GATEWAY_ADMIN_TOKEN/);
+
+    const wrongToken = await fetch(`${base}/api/providers/status`, { headers: { Authorization: 'Bearer sai-token' } });
+    assert.equal(wrongToken.status, 401);
+
+    const rightBearer = await fetch(`${base}/api/providers/status`, { headers: { Authorization: 'Bearer bi-mat-123' } });
+    assert.equal(rightBearer.status, 200);
+
+    const rightHeader = await fetch(`${base}/api/providers/status`, { headers: { 'X-Admin-Token': 'bi-mat-123' } });
+    assert.equal(rightHeader.status, 200, 'header X-Admin-Token phải dùng được thay cho Authorization');
+
+    const oauthNoAuth = await call('/api/claude/oauth/status');
+    assert.equal(oauthNoAuth.status, 401, '/api/claude/oauth/* cũng phải bị chặn');
+  }, { env });
+});
+
+test('admin auth: /api/chat và /v1/chat/completions vẫn mở dù đã đặt GATEWAY_ADMIN_TOKEN', async () => {
+  const env = { GATEWAY_STATE_DIR: tmpStateDir(), GATEWAY_ADMIN_TOKEN: 'bi-mat-123' };
+  await withServer({ a: [{ ok: 'chào' }] }, async (call) => {
+    const chat = await call('/api/chat', json({ message: 'chào' }));
+    assert.equal(chat.status, 200, 'endpoint chính của gateway không được đòi admin token');
+  }, { env });
+});
+
 // ---------- stream ----------
 
 /** Dựng server rồi đọc trọn một phản hồi SSE thành danh sách payload. */
