@@ -4,6 +4,12 @@ Ghi lại thay đổi có ý nghĩa với người dùng gateway (không phải 
 `git log` cho việc đó). Theo tinh thần [Keep a Changelog](https://keepachangelog.com/), phiên
 bản theo [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- Vá advisory `proxy-addr` (critical) và `brace-expansion` (high) qua `npm audit fix` — chỉ đổi
+  `package-lock.json`, không đổi khai báo phụ thuộc.
+
 ## [1.2.0]
 
 ### Added
